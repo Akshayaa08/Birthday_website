@@ -85,6 +85,14 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+app.get("/", (req, res) => {
+  res.json({
+    success: true,
+    message: "Birthday Website API is running"
+  });
+});
+
+
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`💖 Birthday Journey Server running on http://localhost:${PORT}`);
 });
