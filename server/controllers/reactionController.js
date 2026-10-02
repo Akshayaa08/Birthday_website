@@ -85,72 +85,260 @@ export async function createRecordingSession(req, res) {
  * POST /api/reactions/:sessionId/chunk
  * FormData: chunk (file), chunkNumber, dayNumber
  */
+// export async function uploadReactionChunk(req, res) {
+//   try {
+//     const { sessionId } = req.params;
+//     const { chunkNumber = 0, dayNumber } = req.body;
+//     const file = req.file;
+
+//     if (!sessionId) {
+//       return res.status(400).json({ error: 'sessionId param is required.' });
+//     }
+
+//     if (!file || !file.buffer) {
+//       return res.status(400).json({ error: 'No video chunk file provided.' });
+//     }
+
+//     // Write chunk directly to disk
+//     const sessionPath = path.join(sessionsDir, sessionId);
+//     if (!fs.existsSync(sessionPath)) {
+//       fs.mkdirSync(sessionPath, { recursive: true });
+//     }
+
+//     const chunkFileName = `chunk_${String(chunkNumber).padStart(6, '0')}.webm`;
+//     const chunkFilePath = path.join(sessionPath, chunkFileName);
+//     fs.writeFileSync(chunkFilePath, file.buffer);
+
+//     const chunkIndex = Number(chunkNumber);
+
+//     // Update MongoDB document
+//     try {
+//       const updatedDoc = await Reaction.findOneAndUpdate(
+//         { sessionId },
+//         {
+//           $inc: { chunksUploaded: 1 },
+//           $setOnInsert: {
+//             sessionId,
+//             dayNumber: dayNumber ? Number(dayNumber) : 1,
+//             status: 'recording',
+//             startedAt: new Date(),
+//           },
+//         },
+//         { upsert: true, new: true }
+//       );
+
+//       return res.status(200).json({
+//         success: true,
+//         sessionId,
+//         chunkNumber: chunkIndex,
+//         chunksUploaded: updatedDoc.chunksUploaded,
+//       });
+//     } catch (dbErr) {
+//       // Memory fallback
+//       const found = memoryReactions.find((r) => r.sessionId === sessionId);
+//       if (found) {
+//         found.chunksUploaded = (found.chunksUploaded || 0) + 1;
+//       }
+//       return res.status(200).json({
+//         success: true,
+//         sessionId,
+//         chunkNumber: chunkIndex,
+//         chunksUploaded: found ? found.chunksUploaded : chunkIndex + 1,
+//       });
+//     }
+//   } catch (err) {
+//     console.error('Error saving reaction chunk:', err);
+//     return res.status(500).json({ error: 'Failed to save reaction chunk.' });
+//   }
+// }
 export async function uploadReactionChunk(req, res) {
   try {
     const { sessionId } = req.params;
     const { chunkNumber = 0, dayNumber } = req.body;
     const file = req.file;
 
+    console.log('📥 CHUNK UPLOAD REQUEST');
+
+    console.log({
+      sessionId,
+      chunkNumber,
+      dayNumber,
+      hasFile: !!file,
+      fileSize: file?.size,
+      fileName: file?.originalname,
+      mimeType: file?.mimetype,
+    });
+
     if (!sessionId) {
-      return res.status(400).json({ error: 'sessionId param is required.' });
+      return res.status(400).json({
+        success: false,
+        error: 'sessionId param is required.',
+      });
     }
 
-    if (!file || !file.buffer) {
-      return res.status(400).json({ error: 'No video chunk file provided.' });
+    if (!file) {
+      return res.status(400).json({
+        success: false,
+        error: 'No chunk received from browser.',
+      });
     }
 
-    // Write chunk directly to disk
-    const sessionPath = path.join(sessionsDir, sessionId);
-    if (!fs.existsSync(sessionPath)) {
-      fs.mkdirSync(sessionPath, { recursive: true });
+    if (!file.buffer || file.buffer.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Received video chunk is empty.',
+      });
     }
-
-    const chunkFileName = `chunk_${String(chunkNumber).padStart(6, '0')}.webm`;
-    const chunkFilePath = path.join(sessionPath, chunkFileName);
-    fs.writeFileSync(chunkFilePath, file.buffer);
 
     const chunkIndex = Number(chunkNumber);
 
-    // Update MongoDB document
+    if (!Number.isInteger(chunkIndex) || chunkIndex < 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid chunkNumber.',
+      });
+    }
+
+    /*
+     * Prevent unsafe session IDs from creating
+     * unexpected filesystem paths.
+     */
+    if (!/^[a-zA-Z0-9_-]+$/.test(sessionId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid sessionId.',
+      });
+    }
+
+    /*
+     * Create session directory.
+     */
+    const sessionPath = path.join(
+      sessionsDir,
+      sessionId
+    );
+
+    fs.mkdirSync(sessionPath, {
+      recursive: true,
+    });
+
+    /*
+     * IMPORTANT:
+     * Do not blindly increment chunksUploaded.
+     *
+     * If the browser retries chunk 3,
+     * chunk 3 should still count as ONE chunk.
+     */
+    const chunkFileName =
+      `chunk_${String(chunkIndex).padStart(6, '0')}.webm`;
+
+    const chunkFilePath = path.join(
+      sessionPath,
+      chunkFileName
+    );
+
+    /*
+     * Save chunk.
+     */
+    fs.writeFileSync(
+      chunkFilePath,
+      file.buffer
+    );
+
+    console.log(
+      `✅ Chunk ${chunkIndex} saved:`,
+      chunkFilePath
+    );
+
+    /*
+     * Count actual chunks on disk.
+     */
+    const savedChunkFiles = fs
+      .readdirSync(sessionPath)
+      .filter((name) =>
+        /^chunk_\d+\.webm$/.test(name)
+      );
+
+    const actualChunkCount =
+      savedChunkFiles.length;
+
+    /*
+     * Update MongoDB.
+     */
     try {
-      const updatedDoc = await Reaction.findOneAndUpdate(
-        { sessionId },
-        {
-          $inc: { chunksUploaded: 1 },
-          $setOnInsert: {
-            sessionId,
-            dayNumber: dayNumber ? Number(dayNumber) : 1,
-            status: 'recording',
-            startedAt: new Date(),
+      const updatedDoc =
+        await Reaction.findOneAndUpdate(
+          { sessionId },
+
+          {
+            $set: {
+              chunksUploaded:
+                actualChunkCount,
+            },
+
+            $setOnInsert: {
+              sessionId,
+              dayNumber: dayNumber
+                ? Number(dayNumber)
+                : 1,
+              status: 'recording',
+              startedAt: new Date(),
+            },
           },
-        },
-        { upsert: true, new: true }
+
+          {
+            upsert: true,
+            new: true,
+          }
+        );
+
+      console.log(
+        `✅ MongoDB updated. chunksUploaded=${actualChunkCount}`
       );
 
       return res.status(200).json({
         success: true,
         sessionId,
         chunkNumber: chunkIndex,
-        chunksUploaded: updatedDoc.chunksUploaded,
+        chunksUploaded:
+          updatedDoc.chunksUploaded,
       });
     } catch (dbErr) {
-      // Memory fallback
-      const found = memoryReactions.find((r) => r.sessionId === sessionId);
-      if (found) {
-        found.chunksUploaded = (found.chunksUploaded || 0) + 1;
-      }
+      console.error(
+        '⚠️ MongoDB chunk update failed:',
+        dbErr
+      );
+
+      /*
+       * The file has already been safely saved.
+       * Return success for the upload itself.
+       */
       return res.status(200).json({
         success: true,
         sessionId,
         chunkNumber: chunkIndex,
-        chunksUploaded: found ? found.chunksUploaded : chunkIndex + 1,
+        chunksUploaded:
+          actualChunkCount,
+        warning:
+          'Chunk saved locally but MongoDB update failed.',
       });
     }
   } catch (err) {
-    console.error('Error saving reaction chunk:', err);
-    return res.status(500).json({ error: 'Failed to save reaction chunk.' });
+    console.error(
+      '❌ ERROR SAVING REACTION CHUNK'
+    );
+
+    console.error(err);
+
+    return res.status(500).json({
+      success: false,
+      error:
+        err.message ||
+        'Failed to save reaction chunk.',
+    });
   }
 }
+
 
 /**
  * 3. Finalize Recording Session
@@ -180,6 +368,19 @@ export async function finalizeReactionSession(req, res) {
       const buffers = chunkFiles.map((file) => fs.readFileSync(path.join(sessionPath, file)));
       finalBuffer = Buffer.concat(buffers);
     }
+    if (!finalBuffer || finalBuffer.length === 0) {
+  console.error(
+    `❌ No video chunks found for session ${sessionId}`
+  );
+
+  return res.status(400).json({
+    success: false,
+    error:
+      'No video chunks were uploaded. The recording could not be finalized.',
+    sessionId,
+    chunksFound: chunkFiles.length,
+  });
+}
 
     let videoUrl = '';
     let publicId = '';

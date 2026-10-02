@@ -1,27 +1,65 @@
 import multer from 'multer';
 
-// Use memory storage for direct upload streaming to Cloudinary
 const storage = multer.memoryStorage();
 
-// Accept common video formats and binary chunks
 const fileFilter = (req, file, cb) => {
-  if (
-    !file.mimetype ||
-    file.mimetype.startsWith('video/') ||
-    file.mimetype.includes('octet-stream') ||
-    file.mimetype.includes('webm') ||
-    file.mimetype.includes('mp4')
-  ) {
+  console.log('📦 Incoming upload:', {
+    fieldname: file.fieldname,
+    originalname: file.originalname,
+    mimetype: file.mimetype,
+  });
+
+  /*
+   * MediaRecorder chunks can arrive with:
+   *   video/webm
+   *   video/mp4
+   *   application/octet-stream
+   *
+   * In your application they are currently arriving as:
+   *   text/plain
+   *
+   * Therefore we validate the extension as well as MIME type.
+   */
+
+  const fileName = (file.originalname || '').toLowerCase();
+
+  const isVideoExtension =
+    fileName.endsWith('.webm') ||
+    fileName.endsWith('.mp4') ||
+    fileName.endsWith('.m4v');
+
+  const isVideoMime =
+    file.mimetype === 'video/webm' ||
+    file.mimetype === 'video/mp4' ||
+    file.mimetype.startsWith('video/');
+
+  const isBinary =
+    file.mimetype === 'application/octet-stream';
+
+  const isKnownRecording =
+    isVideoExtension ||
+    isVideoMime ||
+    isBinary ||
+    file.mimetype === 'text/plain';
+
+  if (isKnownRecording) {
     cb(null, true);
   } else {
-    cb(new Error('Only video files are allowed!'), false);
+    cb(
+      new Error(
+        `Unsupported upload type: ${file.mimetype}`
+      ),
+      false
+    );
   }
 };
 
 export const upload = multer({
   storage,
+
   limits: {
-    fileSize: 100 * 1024 * 1024, // 100 MB max size
+    fileSize: 200 * 1024 * 1024,
   },
+
   fileFilter,
 });

@@ -32,6 +32,50 @@ app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 // API Routes
 app.use('/api', reactionRoutes);
 
+// Multer / upload error handler
+// app.use((err, req, res, next) => {
+//   if (err) {
+//     console.error('❌ SERVER UPLOAD ERROR');
+//     console.error('Message:', err.message);
+//     console.error('Code:', err.code);
+//     console.error('Field:', err.field);
+
+//     return res.status(500).json({
+//       success: false,
+//       error: err.message || 'Upload failed',
+//       code: err.code || null,
+//       field: err.field || null,
+//     });
+//   }
+
+//   next();
+// });
+
+// Multer / upload error handler
+app.use((err, req, res, next) => {
+  if (err) {
+    console.error('❌ SERVER UPLOAD ERROR');
+    console.error('Message:', err.message);
+    console.error('Code:', err.code);
+    console.error('Field:', err.field);
+
+    const statusCode =
+      err.code === 'LIMIT_FILE_SIZE'
+        ? 413
+        : 400;
+
+    return res.status(statusCode).json({
+      success: false,
+      error: err.message || 'Upload failed',
+      code: err.code || null,
+      field: err.field || null,
+    });
+  }
+
+  next();
+});
+
+
 // Health check endpoint
 app.get('/api/health', (req, res) => {
   res.json({
