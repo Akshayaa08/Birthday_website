@@ -5,8 +5,7 @@
  * finalization, and resilient fallback storage.
  */
 
-const API_BASE = '/api';
-
+const API_BASE = import.meta.env.VITE_API_URL || '/api';
 /**
  * 1. Create a Recording Session on the backend
  * @param {Object} params - { dayNumber, date, sessionId }
