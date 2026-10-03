@@ -1,55 +1,40 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import path from 'path';
-import { fileURLToPath } from 'url';
 import { connectDB } from './config/db.js';
+import { assertAuthConfiguration, optionalAuth } from './middleware/auth.js';
 import reactionRoutes from './routes/reactionRoutes.js';
+import authRoutes from './routes/authRoutes.js';
+import activityRoutes from './routes/activityRoutes.js';
+import videoRoutes from './routes/videoRoutes.js';
 
 dotenv.config();
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
 const app = express();
 const PORT = process.env.PORT || 5000;
+
+assertAuthConfiguration();
 
 // Connect to MongoDB
 connectDB();
 
 // Middleware
-app.use(cors({
-  origin: process.env.CLIENT_URL || 'http://localhost:5173',
-  credentials: true,
-}));
+app.use(
+  cors({
+    origin: process.env.CLIENT_URL || 'http://localhost:5173',
+    credentials: true,
+  })
+);
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Serve local fallback uploads
-app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
-
 // API Routes
+app.use('/api', optionalAuth);
+app.use('/api/auth', authRoutes);
+app.use('/api', activityRoutes);
+app.use('/api', videoRoutes);
 app.use('/api', reactionRoutes);
-
-// Multer / upload error handler
-// app.use((err, req, res, next) => {
-//   if (err) {
-//     console.error('❌ SERVER UPLOAD ERROR');
-//     console.error('Message:', err.message);
-//     console.error('Code:', err.code);
-//     console.error('Field:', err.field);
-
-//     return res.status(500).json({
-//       success: false,
-//       error: err.message || 'Upload failed',
-//       code: err.code || null,
-//       field: err.field || null,
-//     });
-//   }
-
-//   next();
-// });
 
 // Multer / upload error handler
 app.use((err, req, res, next) => {
@@ -75,7 +60,6 @@ app.use((err, req, res, next) => {
   next();
 });
 
-
 // Health check endpoint
 app.get('/api/health', (req, res) => {
   res.json({
@@ -85,14 +69,17 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-app.get("/", (req, res) => {
+// Root endpoint
+app.get('/', (req, res) => {
   res.json({
     success: true,
-    message: "Birthday Website API is running"
+    message: 'Birthday Website API is running',
   });
 });
 
-
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`💖 Birthday Journey Server running on http://localhost:${PORT}`);
+// Start server
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(
+    `💖 Birthday Journey Server running on http://localhost:${PORT}`
+  );
 });

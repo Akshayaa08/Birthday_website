@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -15,16 +15,53 @@ import confetti from 'canvas-confetti';
 import { config } from '../data/config';
 import { isBirthdayAvailable, formatReadableDate } from '../utils/dateUtils';
 import FloatingHearts from '../components/FloatingHearts';
-import DevBanner from '../components/DevBanner';
 import MemoryGallery from '../components/MemoryGallery';
 import LoveReasons from '../components/LoveReasons';
 import ReactionGallery from '../components/ReactionGallery';
 import VideoPlayer from '../components/VideoPlayer';
+import SessionActions from '../components/SessionActions';
+import { useAuth } from '../contexts/AuthContext';
+import { API_BASE, apiFetch } from '../services/api';
 
 export default function Birthday() {
   const navigate = useNavigate();
-  const isUnlocked = isBirthdayAvailable();
+  const { user, ownerTestDate } = useAuth();
+  const isUnlocked = isBirthdayAvailable(ownerTestDate);
   const [isPlayingGrandVideo, setIsPlayingGrandVideo] = useState(false);
+  const [birthdayVideo, setBirthdayVideo] = useState({
+    loading: true,
+    available: false,
+    videoUrl: null,
+    error: '',
+  });
+
+  useEffect(() => {
+    if (!isUnlocked) return undefined;
+    let active = true;
+    setBirthdayVideo({ loading: true, available: false, videoUrl: null, error: '' });
+    apiFetch('/api/videos/19/details')
+      .then((result) => {
+        if (!active) return;
+        setBirthdayVideo({
+          loading: false,
+          available: result.available === true && typeof result.videoUrl === 'string',
+          videoUrl: typeof result.videoUrl === 'string' ? result.videoUrl : null,
+          error: '',
+        });
+      })
+      .catch((error) => {
+        if (!active) return;
+        setBirthdayVideo({
+          loading: false,
+          available: false,
+          videoUrl: null,
+          error: error.message || 'Could not check the birthday video.',
+        });
+      });
+    return () => {
+      active = false;
+    };
+  }, [isUnlocked]);
 
   // Trigger celebration confetti
   const triggerConfetti = () => {
@@ -96,6 +133,7 @@ export default function Birthday() {
         </button>
 
         <div className="flex items-center gap-2">
+          <SessionActions />
           <button
             onClick={triggerConfetti}
             className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-white/90 hover:bg-amber-50 text-amber-700 border border-amber-300 text-xs font-semibold shadow-sm transition-all active:scale-95"
@@ -173,8 +211,18 @@ export default function Birthday() {
               A special video letter filled with all the words my heart holds for you.
             </p>
 
-            {/* Video Player or Play Button */}
-            {!isPlayingGrandVideo ? (
+            {/* Video Player or graceful availability state */}
+            {!birthdayVideo.available || !birthdayVideo.videoUrl ? (
+              <div className="aspect-video w-full rounded-2xl bg-gradient-to-br from-rose-900 to-black border border-rose-400/40 flex flex-col items-center justify-center p-6 text-center">
+                <Gift className="w-10 h-10 text-rose-300 mb-3" />
+                <span className="font-semibold text-base sm:text-lg text-white">
+                  {birthdayVideo.loading ? 'Preparing your birthday surprise...' : birthdayVideo.error ? 'Your surprise is taking a little longer to prepare.' : 'Coming Soon ❤️'}
+                </span>
+                {!birthdayVideo.loading && !birthdayVideo.error && (
+                  <span className="text-xs text-rose-200/80 mt-1">Your birthday video will appear here when it is ready.</span>
+                )}
+              </div>
+            ) : !isPlayingGrandVideo ? (
               <div
                 className="aspect-video w-full rounded-2xl bg-gradient-to-br from-rose-900 to-black border border-rose-400/40 flex flex-col items-center justify-center p-6 text-center group cursor-pointer hover:border-rose-400 transition-all shadow-inner relative overflow-hidden"
                 onClick={() => {
@@ -194,7 +242,7 @@ export default function Birthday() {
               </div>
             ) : (
               <VideoPlayer
-                videoSrc="/videos/birthday.mp4"
+                videoSrc={`${API_BASE}${birthdayVideo.videoUrl}`}
                 title="Happy Birthday My Love ❤️"
                 onEnded={() => triggerConfetti()}
               />
@@ -219,7 +267,7 @@ export default function Birthday() {
       <div className="w-24 h-px bg-gradient-to-r from-transparent via-rose-300 to-transparent mx-auto my-6" />
 
       {/* SECTION: REACTION GALLERY */}
-      <ReactionGallery />
+      {user.role === 'OWNER' && <ReactionGallery />}
 
       {/* FINAL EMOTIONAL LOVE LETTER */}
       <section className="relative z-10 max-w-2xl mx-auto px-4 py-20 text-center">
@@ -257,9 +305,6 @@ export default function Birthday() {
       <footer className="relative z-10 py-8 text-center text-xs text-rose-900/60 border-t border-rose-200/60 font-light">
         Crafted exclusively for {config.boyfriendName} • 19 Days of Us ❤️
       </footer>
-
-      {/* Dev Mode Date Switcher */}
-      <DevBanner onDateChange={() => {}} />
     </div>
   );
 }

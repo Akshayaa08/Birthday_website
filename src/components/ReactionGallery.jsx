@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Heart, Play, Film, X, AlertCircle, Sparkles } from 'lucide-react';
 import { days } from '../data/days';
 import { fetchAllReactions } from '../services/reactionService';
+import { API_BASE } from '../services/api';
 import { formatReadableDate } from '../utils/dateUtils';
 
 export default function ReactionGallery() {
@@ -56,8 +57,8 @@ export default function ReactionGallery() {
           const reaction = reactionsMap[dayItem.day];
           const isCompleted = Boolean(
             reaction &&
-            (reaction.status === 'completed' || (!reaction.status && reaction.reactionVideoUrl)) &&
-            reaction.reactionVideoUrl
+            reaction.status === 'completed' &&
+            reaction.sessionId
           );
           const isIncomplete = Boolean(
             reaction &&
@@ -98,7 +99,8 @@ export default function ReactionGallery() {
                     className="group relative aspect-video w-full rounded-2xl overflow-hidden bg-black cursor-pointer border border-rose-300 shadow-inner flex items-center justify-center"
                   >
                     <video
-                      src={reaction.reactionVideoUrl}
+                      src={`${API_BASE}/api/reactions/${encodeURIComponent(reaction.sessionId)}/video`}
+                      crossOrigin="use-credentials"
                       className="w-full h-full object-cover opacity-85 group-hover:opacity-100 transition-opacity"
                       muted
                       preload="metadata"
@@ -189,7 +191,8 @@ export default function ReactionGallery() {
 
               <div className="aspect-video w-full bg-black">
                 <video
-                  src={activeVideo.reactionVideoUrl}
+                  src={`${API_BASE}/api/reactions/${encodeURIComponent(activeVideo.sessionId)}/video`}
+                  crossOrigin="use-credentials"
                   controls
                   autoPlay
                   className="w-full h-full object-contain"

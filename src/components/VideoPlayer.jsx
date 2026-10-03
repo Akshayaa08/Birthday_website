@@ -2,7 +2,7 @@ import React, { useRef, useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { Play, Pause, Volume2, VolumeX, Maximize, AlertCircle, Heart, Sparkles, CheckCircle } from 'lucide-react';
 
-export default function VideoPlayer({ videoSrc, onEnded, title = "Today's Surprise" }) {
+export default function VideoPlayer({ videoSrc, onEnded, onPlaybackStarted, allowSimulation = true, allowSeeking = true, title = "Today's Surprise" }) {
   const videoRef = useRef(null);
   const containerRef = useRef(null);
 
@@ -23,7 +23,12 @@ export default function VideoPlayer({ videoSrc, onEnded, title = "Today's Surpri
       setDuration(video.duration);
       setHasVideoError(false);
     };
-    const handlePlay = () => setIsPlaying(true);
+    const handlePlay = () => {
+      setIsPlaying(true);
+    };
+    const handlePlaying = () => {
+      if (onPlaybackStarted) onPlaybackStarted();
+    };
     const handlePause = () => setIsPlaying(false);
     const handleEnded = () => {
       setIsPlaying(false);
@@ -36,6 +41,7 @@ export default function VideoPlayer({ videoSrc, onEnded, title = "Today's Surpri
     video.addEventListener('timeupdate', handleTimeUpdate);
     video.addEventListener('loadedmetadata', handleLoadedMetadata);
     video.addEventListener('play', handlePlay);
+    video.addEventListener('playing', handlePlaying);
     video.addEventListener('pause', handlePause);
     video.addEventListener('ended', handleEnded);
     video.addEventListener('error', handleError);
@@ -44,11 +50,12 @@ export default function VideoPlayer({ videoSrc, onEnded, title = "Today's Surpri
       video.removeEventListener('timeupdate', handleTimeUpdate);
       video.removeEventListener('loadedmetadata', handleLoadedMetadata);
       video.removeEventListener('play', handlePlay);
+      video.removeEventListener('playing', handlePlaying);
       video.removeEventListener('pause', handlePause);
       video.removeEventListener('ended', handleEnded);
       video.removeEventListener('error', handleError);
     };
-  }, [onEnded]);
+  }, [onEnded, onPlaybackStarted]);
 
   const togglePlay = () => {
     const video = videoRef.current;
@@ -72,7 +79,7 @@ export default function VideoPlayer({ videoSrc, onEnded, title = "Today's Surpri
 
   const handleSeek = (e) => {
     const video = videoRef.current;
-    if (!video || !duration) return;
+    if (!allowSeeking || !video || !duration) return;
     const newTime = (Number(e.target.value) / 100) * duration;
     video.currentTime = newTime;
     setCurrentTime(newTime);
@@ -110,6 +117,13 @@ export default function VideoPlayer({ videoSrc, onEnded, title = "Today's Surpri
     }, 250);
   };
 
+  const retryVideo = () => {
+    const video = videoRef.current;
+    if (!video) return;
+    setHasVideoError(false);
+    video.load();
+  };
+
   return (
     <div
       ref={containerRef}
@@ -119,12 +133,13 @@ export default function VideoPlayer({ videoSrc, onEnded, title = "Today's Surpri
       <video
         ref={videoRef}
         src={videoSrc}
+        crossOrigin="use-credentials"
         playsInline
         preload="metadata"
         className={`w-full h-full object-contain ${hasVideoError ? 'hidden' : 'block'}`}
       />
 
-      {/* Fallback View if MP4 has not yet been placed in public/videos/ */}
+      {/* Fallback View when the authenticated video stream cannot be loaded */}
       {hasVideoError && (
         <div className="absolute inset-0 flex flex-col items-center justify-center p-6 text-center bg-gradient-to-br from-rose-950/90 via-black to-pink-950/80">
           <motion.div
@@ -140,10 +155,17 @@ export default function VideoPlayer({ videoSrc, onEnded, title = "Today's Surpri
           </h4>
 
           <p className="text-xs sm:text-sm text-rose-200/80 max-w-md mb-4">
-            Upload your personal video to <code className="text-amber-300 font-mono bg-black/40 px-2 py-0.5 rounded">{videoSrc}</code>
+            We couldn't load this surprise right now. Please try again.
           </p>
 
           <button
+            onClick={retryVideo}
+            className="inline-flex items-center gap-2 px-5 py-2.5 rounded-full bg-white/15 hover:bg-white/25 text-white text-xs sm:text-sm font-semibold transition-colors"
+          >
+            Try Again
+          </button>
+
+          {allowSimulation && <button
             onClick={handleSimulateWatch}
             disabled={isSimulating}
             className="inline-flex items-center gap-2 px-5 py-2.5 rounded-full bg-gradient-to-r from-rose-500 to-pink-500 hover:from-rose-600 hover:to-pink-600 text-white text-xs sm:text-sm font-semibold shadow-lg transition-transform active:scale-95"
@@ -159,7 +181,7 @@ export default function VideoPlayer({ videoSrc, onEnded, title = "Today's Surpri
                 <span>Simulate Watching Surprise</span>
               </>
             )}
-          </button>
+          </button>}
         </div>
       )}
 
@@ -184,7 +206,9 @@ export default function VideoPlayer({ videoSrc, onEnded, title = "Today's Surpri
             max="100"
             value={duration ? (currentTime / duration) * 100 : 0}
             onChange={handleSeek}
-            className="w-full h-1.5 bg-white/30 rounded-lg appearance-none cursor-pointer accent-rose-500 mb-3"
+            disabled={!allowSeeking}
+            aria-label="Video progress"
+            className={`w-full h-1.5 bg-white/30 rounded-lg appearance-none accent-rose-500 mb-3 ${allowSeeking ? 'cursor-pointer' : 'cursor-default'}`}
           />
 
           <div className="flex items-center justify-between text-white text-xs sm:text-sm">

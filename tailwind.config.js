@@ -1,8 +1,13 @@
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const projectDirectory = path.dirname(fileURLToPath(import.meta.url));
+
 /** @type {import('tailwindcss').Config} */
 export default {
   content: [
-    "./index.html",
-    "./src/**/*.{js,ts,jsx,tsx}",
+    path.join(projectDirectory, 'index.html'),
+    path.join(projectDirectory, 'src/**/*.{js,ts,jsx,tsx}'),
   ],
   theme: {
     extend: {

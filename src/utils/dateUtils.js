@@ -1,39 +1,18 @@
-import { config } from '../data/config';
+import { config } from '../data/config.js';
 
 /**
- * Returns today's date formatted as "YYYY-MM-DD" in the specified timezone
- * Respects devMode and testDate if enabled.
+ * Returns today's date formatted as "YYYY-MM-DD" in the specified timezone.
  */
-export function getTodayDateString(timeZone = config.timezone) {
-  if (config.devMode && config.testDate) {
-    return config.testDate;
-  }
-
-  try {
-    const formatter = new Intl.DateTimeFormat('en-CA', {
-      timeZone,
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit'
-    });
-    return formatter.format(new Date());
-  } catch (err) {
-    // Fallback if timezone not supported
-    const d = new Date();
-    return d.toISOString().split('T')[0];
-  }
-}
-
-/**
- * Returns current Date object in timezone (or simulated if devMode is on)
- */
-export function getCurrentDateTime(timeZone = config.timezone) {
-  if (config.devMode && config.testDate) {
-    // Create Date at 00:00:00 of the test date in local time
-    const [year, month, day] = config.testDate.split('-').map(Number);
-    return new Date(year, month - 1, day, 12, 0, 0);
-  }
-  return new Date();
+export function getTodayDateString(timeZone = config.timezone, dateOverride = '') {
+  if (/^2026-10-(0[1-9]|1[0-9])$/.test(dateOverride)) return dateOverride;
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(new Date(Date.now()));
+  const dateParts = Object.fromEntries(parts.map(({ type, value }) => [type, value]));
+  return `${dateParts.year}-${dateParts.month}-${dateParts.day}`;
 }
 
 /**
@@ -42,8 +21,8 @@ export function getCurrentDateTime(timeZone = config.timezone) {
  * today === surpriseDate  -> 'AVAILABLE'
  * today > surpriseDate   -> 'COMPLETED'
  */
-export function getDayStatus(surpriseDateStr) {
-  const today = getTodayDateString();
+export function getDayStatus(surpriseDateStr, dateOverride = '') {
+  const today = getTodayDateString(config.timezone, dateOverride);
 
   if (today < surpriseDateStr) {
     return 'LOCKED';
@@ -57,16 +36,16 @@ export function getDayStatus(surpriseDateStr) {
 /**
  * Check if the entire 19-day journey has begun
  */
-export function isJourneyStarted() {
-  const today = getTodayDateString();
+export function isJourneyStarted(dateOverride = '') {
+  const today = getTodayDateString(config.timezone, dateOverride);
   return today >= config.journeyStart;
 }
 
 /**
  * Check if today is the grand birthday (October 19) or past it
  */
-export function isBirthdayAvailable() {
-  const today = getTodayDateString();
+export function isBirthdayAvailable(dateOverride = '') {
+  const today = getTodayDateString(config.timezone, dateOverride);
   return today >= config.birthday;
 }
 
@@ -93,20 +72,16 @@ export function formatReadableDate(dateStr, short = false) {
 /**
  * Calculate countdown remaining time until a target date at midnight (00:00:00) in timezone
  */
-export function calculateTimeRemaining(targetDateStr = config.birthday) {
-  let now = new Date();
-  if (config.devMode && config.testDate) {
-    now = getCurrentDateTime();
-  }
-
+export function calculateTimeRemaining(targetDateStr = config.birthday, dateOverride = '') {
   // Target midnight (00:00:00) in Asia/Kolkata (+05:30)
   const targetIso = `${targetDateStr}T00:00:00+05:30`;
   const targetTime = new Date(targetIso).getTime();
-  const nowTime = now.getTime();
+  const now = /^2026-10-(0[1-9]|1[0-9])$/.test(dateOverride)
+    ? new Date(`${dateOverride}T12:00:00+05:30`).getTime()
+    : Date.now();
+  const totalSeconds = Math.floor((targetTime - now) / 1000);
 
-  const diffMs = targetTime - nowTime;
-
-  if (diffMs <= 0) {
+  if (totalSeconds <= 0) {
     return {
       days: 0,
       hours: 0,
@@ -117,10 +92,10 @@ export function calculateTimeRemaining(targetDateStr = config.birthday) {
     };
   }
 
-  const seconds = Math.floor((diffMs / 1000) % 60);
-  const minutes = Math.floor((diffMs / (1000 * 60)) % 60);
-  const hours = Math.floor((diffMs / (1000 * 60 * 60)) % 24);
-  const days = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
 
   return {
     days,
@@ -128,6 +103,6 @@ export function calculateTimeRemaining(targetDateStr = config.birthday) {
     minutes,
     seconds,
     isExpired: false,
-    totalMs: diffMs
+    totalMs: totalSeconds * 1000
   };
 }

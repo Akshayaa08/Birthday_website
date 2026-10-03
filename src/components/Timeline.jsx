@@ -6,9 +6,9 @@ import { getDayStatus, isBirthdayAvailable, formatReadableDate } from '../utils/
 import { config } from '../data/config';
 import { useNavigate } from 'react-router-dom';
 
-export default function Timeline({ daysList, onSelectDay }) {
+export default function Timeline({ daysList, onSelectDay, todayOverride = '' }) {
   const navigate = useNavigate();
-  const birthdayUnlocked = isBirthdayAvailable();
+  const birthdayUnlocked = isBirthdayAvailable(todayOverride);
 
   return (
     <div className="relative w-full max-w-5xl mx-auto py-8 px-4 sm:px-6">
@@ -19,7 +19,7 @@ export default function Timeline({ daysList, onSelectDay }) {
       <div className="space-y-8 md:space-y-16">
         {daysList.map((dayItem, index) => {
           const isLeft = index % 2 === 0;
-          const status = getDayStatus(dayItem.date);
+          const status = getDayStatus(dayItem.date, todayOverride);
           const isAvailable = status === 'AVAILABLE';
           const isCompleted = status === 'COMPLETED';
 

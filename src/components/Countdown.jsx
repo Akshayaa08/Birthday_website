@@ -4,20 +4,31 @@ import { calculateTimeRemaining } from '../utils/dateUtils';
 import { Sparkles, Heart } from 'lucide-react';
 import { config } from '../data/config';
 
-export default function Countdown({ targetDate = config.birthday, onComplete }) {
-  const [timeLeft, setTimeLeft] = useState(() => calculateTimeRemaining(targetDate));
+export default function Countdown({ targetDate = config.birthday, dateOverride = '', onComplete }) {
+  const [timeLeft, setTimeLeft] = useState(() => calculateTimeRemaining(targetDate, dateOverride));
 
   useEffect(() => {
-    const timer = setInterval(() => {
-      const remaining = calculateTimeRemaining(targetDate);
+    let timer;
+    let didComplete = false;
+
+    const updateCountdown = () => {
+      const remaining = calculateTimeRemaining(targetDate, dateOverride);
       setTimeLeft(remaining);
-      if (remaining.isExpired && onComplete) {
-        onComplete();
+
+      if (remaining.isExpired) {
+        if (timer) clearInterval(timer);
+        if (!didComplete && onComplete) onComplete();
+        didComplete = true;
       }
-    }, 1000);
+      return remaining.isExpired;
+    };
+
+    if (!updateCountdown()) {
+      timer = setInterval(updateCountdown, 1000);
+    }
 
     return () => clearInterval(timer);
-  }, [targetDate, onComplete]);
+  }, [targetDate, dateOverride, onComplete]);
 
   const timeUnits = [
     { label: 'Days', value: timeLeft.days },

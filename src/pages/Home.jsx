@@ -3,19 +3,16 @@ import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { Heart, Sparkles, Calendar, ChevronRight, Lock } from 'lucide-react';
 import { config } from '../data/config';
-import { isJourneyStarted, getTodayDateString } from '../utils/dateUtils';
+import { isJourneyStarted } from '../utils/dateUtils';
 import Countdown from '../components/Countdown';
 import FloatingHearts from '../components/FloatingHearts';
-import DevBanner from '../components/DevBanner';
+import SessionActions from '../components/SessionActions';
+import { useAuth } from '../contexts/AuthContext';
 
 export default function Home() {
   const navigate = useNavigate();
-  const [currentDate, setCurrentDate] = useState(() => getTodayDateString());
-  const journeyBegun = isJourneyStarted();
-
-  const handleDateChange = (newDate) => {
-    setCurrentDate(newDate);
-  };
+  const { ownerTestDate } = useAuth();
+  const journeyBegun = isJourneyStarted(ownerTestDate);
 
   return (
     <div className="relative min-h-screen romantic-bg overflow-hidden flex flex-col justify-between">
@@ -50,6 +47,7 @@ export default function Home() {
           <Calendar className="w-3.5 h-3.5 text-rose-500" />
           <span>October 1 – 19, 2026</span>
         </motion.div>
+        <SessionActions />
       </header>
 
       {/* Main Hero Content */}
@@ -156,7 +154,7 @@ export default function Home() {
           transition={{ duration: 0.8, delay: 0.3 }}
           className="w-full mb-10 md:mb-12"
         >
-          <Countdown targetDate={config.birthday} />
+          <Countdown targetDate={config.birthday} dateOverride={ownerTestDate} />
         </motion.div>
 
         {/* Call to Action Button */}
@@ -178,6 +176,14 @@ export default function Home() {
             <ChevronRight className="w-5 h-5 relative z-10 group-hover:translate-x-1 transition-transform" />
           </button>
 
+          <button
+            type="button"
+            onClick={() => navigate('/login')}
+            className="px-6 py-3 rounded-full bg-white/80 border border-rose-200 text-sm md:text-base font-semibold text-rose-700 hover:bg-rose-50 transition-colors"
+          >
+            Login
+          </button>
+
           {!journeyBegun && (
             <div className="flex items-center gap-1.5 text-xs text-gray-500 bg-white/60 px-3.5 py-2 rounded-full border border-rose-100">
               <Lock className="w-3.5 h-3.5 text-rose-400" />
@@ -193,9 +199,6 @@ export default function Home() {
           Crafted with all my love for {config.boyfriendName} • Every second counts ❤️
         </p>
       </footer>
-
-      {/* Dev Mode Simulated Date Switcher */}
-      <DevBanner onDateChange={handleDateChange} />
     </div>
   );
 }

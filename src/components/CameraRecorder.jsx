@@ -10,7 +10,6 @@ import {
   Video,
   AlertCircle,
   Check,
-  StopCircle,
 } from 'lucide-react';
 
 import {
@@ -26,10 +25,9 @@ const CameraRecorder = forwardRef(function CameraRecorder(
     dayNumber,
     date,
     sessionId: propSessionId,
-    onSessionStarted,
+    onRecordingReady,
     onRecordingFinalized,
     onError,
-    onStopRequested,
   },
   ref
 ) {
@@ -38,7 +36,7 @@ const CameraRecorder = forwardRef(function CameraRecorder(
   const streamRef = useRef(null);
 
   const chunkIndexRef = useRef(0);
-  const allChunksRef = useRef([]);
+  const hasReportedFailureRef = useRef(false);
 
   const sessionIdRef = useRef(
     propSessionId ||
@@ -54,6 +52,7 @@ const CameraRecorder = forwardRef(function CameraRecorder(
   const uploadPromisesRef = useRef([]);
 
   const [hasPermission, setHasPermission] = useState(false);
+  const [isRecorderRunning, setIsRecorderRunning] = useState(false);
   const [isInitializing, setIsInitializing] = useState(true);
   const [errorMessage, setErrorMessage] = useState(null);
   const [savedSeconds, setSavedSeconds] = useState(0);
@@ -79,6 +78,27 @@ const CameraRecorder = forwardRef(function CameraRecorder(
     return () => clearInterval(interval);
   }, [hasPermission, isFinishing]);
 
+  const reportRecordingFailure = (error) => {
+    if (hasReportedFailureRef.current) return;
+    hasReportedFailureRef.current = true;
+    const message = error instanceof Error ? error.message : String(error);
+    setErrorMessage(message);
+    setStatusMessage(message);
+    if (onError) onError(message);
+    markSessionIncomplete(sessionIdRef.current);
+    if (mediaRecorderRef.current?.state === 'recording') {
+      try {
+        mediaRecorderRef.current.stop();
+      } catch (stopError) {
+        console.error('Could not stop the failed recorder:', stopError);
+      }
+    }
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+  };
+
   /*
    * Upload one chunk
    */
@@ -91,9 +111,7 @@ const CameraRecorder = forwardRef(function CameraRecorder(
     })
       .then((result) => {
         if (!result.success) {
-          throw result.error || new Error(
-            `Chunk ${chunkNumber} upload failed`
-          );
+          throw result.error || new Error(`Chunk ${chunkNumber} upload failed.`);
         }
 
         setStatusMessage(
@@ -101,8 +119,9 @@ const CameraRecorder = forwardRef(function CameraRecorder(
             chunkNumber === 0 ? '' : 's'
           })`
         );
+        if (chunkNumber === 0 && onRecordingReady) onRecordingReady();
 
-        return result;
+        return true;
       })
       .catch((error) => {
         console.error(
@@ -110,11 +129,8 @@ const CameraRecorder = forwardRef(function CameraRecorder(
           error
         );
 
-        setStatusMessage(
-          'Unable to upload reaction chunk. Please check your connection.'
-        );
-
-        throw error;
+        reportRecordingFailure(error);
+        return false;
       });
 
     uploadPromisesRef.current.push(uploadPromise);
@@ -201,13 +217,9 @@ const CameraRecorder = forwardRef(function CameraRecorder(
           `⏳ Waiting for ${uploadPromises.length} chunk upload(s)...`
         );
 
-        const results = await Promise.allSettled(uploadPromises);
-
-        const failedUploads = results.filter(
-          (result) => result.status === 'rejected'
-        );
-
-        if (failedUploads.length > 0) {
+        const results = await Promise.all(uploadPromises);
+        const failedUploads = results.filter((uploaded) => !uploaded);
+        if (failedUploads.length) {
           throw new Error(
             `${failedUploads.length} video chunk upload(s) failed.`
           );
@@ -220,27 +232,11 @@ const CameraRecorder = forwardRef(function CameraRecorder(
        * STEP 3
        * Make sure we actually recorded something.
        */
-      if (allChunksRef.current.length === 0) {
+      if (chunkIndexRef.current === 0) {
         throw new Error(
           'No video data was recorded. Please record for a few seconds and try again.'
         );
       }
-
-      const fallbackBlob = new Blob(
-        allChunksRef.current,
-        { type: 'video/webm' }
-      );
-
-      console.log(
-        '🎥 Recorded chunks:',
-        allChunksRef.current.length
-      );
-
-      console.log(
-        '🎥 Recorded size:',
-        fallbackBlob.size,
-        'bytes'
-      );
 
       /*
        * STEP 4
@@ -250,7 +246,6 @@ const CameraRecorder = forwardRef(function CameraRecorder(
         sessionId: sessionIdRef.current,
         dayNumber,
         date,
-        localFallbackBlob: fallbackBlob,
       });
 
       console.log(
@@ -393,7 +388,6 @@ const CameraRecorder = forwardRef(function CameraRecorder(
 
         mediaRecorderRef.current = mediaRecorder;
 
-        allChunksRef.current = [];
         chunkIndexRef.current = 0;
         uploadPromisesRef.current = [];
 
@@ -407,21 +401,23 @@ const CameraRecorder = forwardRef(function CameraRecorder(
             date,
           });
 
+        if (!sessionResult.success) throw sessionResult.error || new Error('Could not start the secure recording session.');
+        if (isCancelled) {
+          markSessionIncomplete(sessionIdRef.current);
+          stream.getTracks().forEach((track) => track.stop());
+          streamRef.current = null;
+          return;
+        }
+
         console.log(
           '✅ Recording session:',
           sessionResult
         );
 
-        if (onSessionStarted) {
-          onSessionStarted(
-            sessionIdRef.current
-          );
-        }
-
         /*
          * IMPORTANT:
          * Every time MediaRecorder produces data,
-         * save it locally AND upload it.
+         * upload it immediately; the browser does not retain the full recording.
          */
         mediaRecorder.ondataavailable = (event) => {
           console.log(
@@ -434,10 +430,6 @@ const CameraRecorder = forwardRef(function CameraRecorder(
             event.data &&
             event.data.size > 0
           ) {
-            allChunksRef.current.push(
-              event.data
-            );
-
             const currentChunk =
               chunkIndexRef.current;
 
@@ -451,19 +443,21 @@ const CameraRecorder = forwardRef(function CameraRecorder(
         };
 
         mediaRecorder.onerror = (event) => {
-          console.error(
-            '❌ MediaRecorder error:',
-            event
-          );
+          const error = event.error || new Error('Reaction recording stopped unexpectedly.');
+          console.error('MediaRecorder error:', error);
+          setIsRecorderRunning(false);
+          reportRecordingFailure(error);
         };
 
         mediaRecorder.onstart = () => {
+          setIsRecorderRunning(true);
           console.log(
             '🔴 MediaRecorder started'
           );
         };
 
         mediaRecorder.onstop = () => {
+          setIsRecorderRunning(false);
           console.log(
             '⏹ MediaRecorder stopped'
           );
@@ -491,10 +485,15 @@ const CameraRecorder = forwardRef(function CameraRecorder(
 
         setIsInitializing(false);
 
+        if (streamRef.current) {
+          streamRef.current.getTracks().forEach((track) => track.stop());
+          streamRef.current = null;
+        }
+
         const friendly =
           error.name === 'NotAllowedError' ||
           error.name === 'PermissionDeniedError'
-            ? 'Camera permission was not granted ❤️'
+            ? 'Camera and microphone access are required to unlock today’s surprise. Please enable both permissions in your browser and try again.'
             : 'Could not access camera/microphone.';
 
         setErrorMessage(friendly);
@@ -593,10 +592,10 @@ const CameraRecorder = forwardRef(function CameraRecorder(
               }}
             />
 
-            <div className="absolute top-2.5 left-2.5 flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-red-600/90 text-white text-[10px] font-bold tracking-wider uppercase shadow-md">
+            {isRecorderRunning && <div className="absolute top-2.5 left-2.5 flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-red-600/90 text-white text-[10px] font-bold tracking-wider uppercase shadow-md">
               <span className="w-2 h-2 rounded-full bg-white animate-ping" />
               <span>RECORDING</span>
-            </div>
+            </div>}
 
             <div className="absolute top-2.5 right-2.5 p-1 rounded-full bg-black/50 text-rose-300">
               <Video className="w-3.5 h-3.5" />
@@ -624,26 +623,6 @@ const CameraRecorder = forwardRef(function CameraRecorder(
                 <span>Reaction saving</span>
               </span>
 
-              <button
-                type="button"
-                onClick={() => {
-                  if (onStopRequested) {
-                    onStopRequested();
-                  } else {
-                    stopAndFinalize();
-                  }
-                }}
-                disabled={isFinishing}
-                className="text-rose-400 hover:text-rose-300 font-semibold flex items-center gap-1 transition-colors"
-              >
-                <StopCircle className="w-3.5 h-3.5" />
-
-                <span>
-                  {isFinishing
-                    ? 'Saving...'
-                    : 'Stop'}
-                </span>
-              </button>
             </div>
           </div>
         </motion.div>

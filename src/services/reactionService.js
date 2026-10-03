@@ -2,20 +2,21 @@
  * Reaction Service
  * 
  * Manages continuous chunked recording sessions, chunk uploads with retry,
- * finalization, and resilient fallback storage.
+ * and server-side finalization.
  */
 
-const API_BASE = import.meta.env.VITE_API_URL || '/api';
+import { API_BASE } from './api';
 /**
  * 1. Create a Recording Session on the backend
  * @param {Object} params - { dayNumber, date, sessionId }
  */
 export async function createRecordingSession({ dayNumber, date, sessionId }) {
   try {
-    const response = await fetch(`${API_BASE}/reactions/session`, {
+    const response = await fetch(`${API_BASE}/api/reactions/session`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ dayNumber, date, sessionId }),
+      credentials: 'include',
     });
 
     if (!response.ok) {
@@ -26,18 +27,8 @@ export async function createRecordingSession({ dayNumber, date, sessionId }) {
     const data = await response.json();
     return { success: true, session: data.session };
   } catch (error) {
-    console.warn('Backend session creation warning (local session fallback):', error.message);
-    // Local fallback session
-    const localSession = {
-      sessionId,
-      dayNumber,
-      date,
-      status: 'recording',
-      startedAt: new Date().toISOString(),
-      chunksUploaded: 0,
-    };
-    saveLocalSession(localSession);
-    return { success: true, session: localSession, isFallback: true };
+    console.error('Backend session creation failed:', error.message);
+    return { success: false, error };
   }
 }
 
@@ -61,13 +52,15 @@ export async function uploadReactionChunk(
       formData.append('dayNumber', dayNumber);
       formData.append('chunk', chunkBlob, `chunk_${chunkNumber}.webm`);
 
-      const response = await fetch(`${API_BASE}/reactions/${sessionId}/chunk`, {
+      const response = await fetch(`${API_BASE}/api/reactions/${encodeURIComponent(sessionId)}/chunk`, {
         method: 'POST',
         body: formData,
+        credentials: 'include',
       });
 
       if (!response.ok) {
-        throw new Error(`Server chunk upload error HTTP ${response.status}`);
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.message || `Reaction chunk upload failed (HTTP ${response.status}).`);
       }
 
       const data = await response.json();
@@ -82,21 +75,22 @@ export async function uploadReactionChunk(
     }
   }
 
-  // All retries failed - preserve in local memory/storage as pending
+  // The caller will stop playback from being treated as a successfully saved reaction.
   console.warn(`Chunk ${chunkNumber} failed after ${maxRetries} retries.`);
-  return { success: false, error: lastError, pending: true };
+  return { success: false, error: lastError, pending: false };
 }
 
 /**
  * 3. Finalize Recording Session
- * @param {Object} params - { sessionId, dayNumber, date, localFallbackBlob }
+ * @param {Object} params - { sessionId, dayNumber, date }
  */
-export async function finalizeReactionSession({ sessionId, dayNumber, date, localFallbackBlob }) {
+export async function finalizeReactionSession({ sessionId, dayNumber, date }) {
   try {
-    const response = await fetch(`${API_BASE}/reactions/${sessionId}/finalize`, {
+    const response = await fetch(`${API_BASE}/api/reactions/${encodeURIComponent(sessionId)}/finalize`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ dayNumber, date }),
+      credentials: 'include',
     });
 
     if (!response.ok) {
@@ -105,39 +99,10 @@ export async function finalizeReactionSession({ sessionId, dayNumber, date, loca
     }
 
     const data = await response.json();
-    const videoUrl = data.reaction?.reactionVideoUrl || '';
-    markDayCompletedLocally(dayNumber, videoUrl);
-
     return { success: true, data };
   } catch (error) {
-    console.warn('Backend finalize fallback (saving local video url):', error.message);
-
-    let localVideoUrl = '';
-    if (localFallbackBlob) {
-      localVideoUrl = URL.createObjectURL(localFallbackBlob);
-    }
-
-    const fallbackReaction = {
-      sessionId,
-      dayNumber,
-      date,
-      status: 'completed',
-      reactionVideoUrl: localVideoUrl,
-      createdAt: new Date().toISOString(),
-      isLocal: true,
-    };
-
-    saveLocalFallbackReaction(fallbackReaction);
-    markDayCompletedLocally(dayNumber, localVideoUrl);
-
-    return {
-      success: true,
-      data: {
-        message: 'Saved locally ❤️',
-        reaction: fallbackReaction,
-      },
-      isFallback: true,
-    };
+    console.error('Backend reaction finalization failed:', error.message);
+    return { success: false, error };
   }
 }
 
@@ -148,23 +113,14 @@ export async function finalizeReactionSession({ sessionId, dayNumber, date, loca
  */
 export function markSessionIncomplete(sessionId) {
   if (!sessionId) return;
-  const url = `${API_BASE}/reactions/${sessionId}/incomplete`;
+  const url = `${API_BASE}/api/reactions/${encodeURIComponent(sessionId)}/incomplete`;
 
-  try {
-    if (navigator.sendBeacon) {
-      const blob = new Blob([JSON.stringify({ sessionId })], { type: 'application/json' });
-      navigator.sendBeacon(url, blob);
-    } else {
-      fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId }),
-        keepalive: true,
-      }).catch(() => {});
-    }
-  } catch (e) {
-    // ignore
-  }
+  fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      keepalive: true,
+      credentials: 'include',
+    }).catch((error) => console.error('Could not mark reaction recording incomplete:', error.message));
 }
 
 /**
@@ -172,36 +128,24 @@ export function markSessionIncomplete(sessionId) {
  */
 export async function fetchAllReactions() {
   try {
-    const response = await fetch(`${API_BASE}/reactions`);
-    if (response.ok) {
-      const data = await response.json();
-      if (Array.isArray(data.reactions) && data.reactions.length > 0) {
-        return data.reactions;
-      }
-    }
+    const response = await fetch(`${API_BASE}/api/reactions`, { credentials: 'include' });
+    if (!response.ok) throw new Error(`Could not load reactions (HTTP ${response.status}).`);
+    const data = await response.json();
+    return Array.isArray(data.reactions) ? data.reactions : [];
   } catch (e) {
-    console.warn('Backend unavailable, reading local reactions cache:', e.message);
+    console.warn('Could not load owner reactions:', e.message);
+    throw e;
   }
-
-  return getLocalReactions();
 }
 
 /**
  * 6. Fetch a single reaction by day number
  */
 export async function fetchReactionByDay(dayNumber) {
-  try {
-    const response = await fetch(`${API_BASE}/reactions/${dayNumber}`);
-    if (response.ok) {
-      const data = await response.json();
-      if (data.reaction) return data.reaction;
-    }
-  } catch (e) {
-    // continue
-  }
-
-  const local = getLocalReactions();
-  return local.find((r) => Number(r.dayNumber) === Number(dayNumber)) || null;
+  const response = await fetch(`${API_BASE}/api/reactions/${dayNumber}`, { credentials: 'include' });
+  if (!response.ok) throw new Error(`Could not load reaction (HTTP ${response.status}).`);
+  const data = await response.json();
+  return data.reaction || null;
 }
 
 /**
@@ -216,9 +160,10 @@ export async function uploadReaction({ dayNumber, date, videoBlob }) {
   formData.append('reactionVideo', videoBlob, `reaction-day-${dayNumber}.${extension}`);
 
   try {
-    const response = await fetch(`${API_BASE}/reactions`, {
+    const response = await fetch(`${API_BASE}/api/reactions`, {
       method: 'POST',
       body: formData,
+      credentials: 'include',
     });
 
     if (!response.ok) {
@@ -227,83 +172,9 @@ export async function uploadReaction({ dayNumber, date, videoBlob }) {
     }
 
     const data = await response.json();
-    markDayCompletedLocally(dayNumber, data.reaction?.reactionVideoUrl);
     return { success: true, data };
   } catch (error) {
-    const localVideoUrl = URL.createObjectURL(videoBlob);
-    saveLocalFallbackReaction({
-      dayNumber,
-      date,
-      status: 'completed',
-      reactionVideoUrl: localVideoUrl,
-      createdAt: new Date().toISOString(),
-      isLocal: true,
-    });
-    markDayCompletedLocally(dayNumber, localVideoUrl);
-
-    return {
-      success: true,
-      data: {
-        message: 'Saved locally ❤️',
-        reaction: { dayNumber, date, reactionVideoUrl: localVideoUrl },
-      },
-      isFallback: true,
-    };
-  }
-}
-
-// ----------------------------------------------------------------------------
-// Local Storage Helpers
-// ----------------------------------------------------------------------------
-
-function getLocalReactions() {
-  try {
-    const stored = localStorage.getItem('romantic_reactions');
-    return stored ? JSON.parse(stored) : [];
-  } catch {
-    return [];
-  }
-}
-
-function saveLocalFallbackReaction(reaction) {
-  try {
-    const existing = getLocalReactions().filter(
-      (r) => Number(r.dayNumber) !== Number(reaction.dayNumber)
-    );
-    existing.push(reaction);
-    localStorage.setItem('romantic_reactions', JSON.stringify(existing));
-  } catch (e) {
-    console.warn('Failed to save reaction locally:', e);
-  }
-}
-
-function saveLocalSession(session) {
-  try {
-    const sessions = JSON.parse(localStorage.getItem('romantic_sessions') || '[]');
-    sessions.push(session);
-    localStorage.setItem('romantic_sessions', JSON.stringify(sessions));
-  } catch (e) {
-    // ignore
-  }
-}
-
-function markDayCompletedLocally(dayNumber, videoUrl) {
-  try {
-    const completedDays = JSON.parse(localStorage.getItem('completed_days') || '[]');
-    if (!completedDays.includes(dayNumber)) {
-      completedDays.push(dayNumber);
-      localStorage.setItem('completed_days', JSON.stringify(completedDays));
-    }
-  } catch (e) {
-    console.warn('Failed to mark day completed locally:', e);
-  }
-}
-
-export function isDayCompletedLocally(dayNumber) {
-  try {
-    const completedDays = JSON.parse(localStorage.getItem('completed_days') || '[]');
-    return completedDays.includes(Number(dayNumber));
-  } catch {
-    return false;
+    console.error('Backend reaction upload failed:', error.message);
+    return { success: false, error };
   }
 }

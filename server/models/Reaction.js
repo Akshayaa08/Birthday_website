@@ -7,6 +7,16 @@ const reactionSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
+    userId: {
+      type: String,
+      required: true,
+      index: true,
+    },
+    role: {
+      type: String,
+      enum: ['BOYFRIEND'],
+      required: true,
+    },
     dayNumber: {
       type: Number,
       required: true,
@@ -41,6 +51,19 @@ const reactionSchema = new mongoose.Schema(
     cloudinaryPublicId: {
       type: String,
       default: '',
+    },
+    storageType: {
+      type: String,
+      enum: ['cloudinary', 'local'],
+      default: 'local',
+    },
+    localFileName: {
+      type: String,
+      default: '',
+    },
+    videoFormat: {
+      type: String,
+      default: 'webm',
     },
   },
   {

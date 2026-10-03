@@ -4,27 +4,30 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   Heart,
   Video,
-  Eye,
   ArrowLeft,
   Sparkles,
   Lock,
   Calendar,
   CheckCircle2,
   AlertCircle,
-  StopCircle,
 } from 'lucide-react';
 import { days } from '../data/days';
 import { config } from '../data/config';
 import { getDayStatus, formatReadableDate } from '../utils/dateUtils';
+import { API_BASE, apiFetch } from '../services/api';
 import VideoPlayer from '../components/VideoPlayer';
 import CameraRecorder from '../components/CameraRecorder';
 import FloatingHearts from '../components/FloatingHearts';
-import DevBanner from '../components/DevBanner';
-import { isDayCompletedLocally, markSessionIncomplete } from '../services/reactionService';
+import { markSessionIncomplete } from '../services/reactionService';
+import { recordVideoCompleted, recordVideoSeen, recordVideoWatching } from '../services/activityService';
+import SessionActions from '../components/SessionActions';
+import { useAuth } from '../contexts/AuthContext';
 
 export default function DailySurprise() {
   const { dayNumber } = useParams();
   const navigate = useNavigate();
+  const { user, ownerTestDate } = useAuth();
+  const isOwner = user.role === 'OWNER';
 
   const dayNum = parseInt(dayNumber, 10);
   const dayData = days.find((d) => d.day === dayNum);
@@ -34,7 +37,15 @@ export default function DailySurprise() {
   const [recordReaction, setRecordReaction] = useState(false);
   const [isFinalizing, setIsFinalizing] = useState(false);
   const [uploadMessage, setUploadMessage] = useState('');
-  const [isDayDone, setIsDayDone] = useState(false);
+  const [isRecordingReady, setIsRecordingReady] = useState(false);
+  const [recordingError, setRecordingError] = useState('');
+  const [activityError, setActivityError] = useState('');
+  const [videoAvailability, setVideoAvailability] = useState({
+    loading: true,
+    available: false,
+    videoUrl: null,
+    error: '',
+  });
 
   // Unique session ID for continuous recording
   const sessionIdRef = useRef(
@@ -44,12 +55,45 @@ export default function DailySurprise() {
   );
 
   const recorderRef = useRef(null);
+  const videoEndedRef = useRef(false);
+  const hasReportedVideoStartRef = useRef(false);
+  const activityStartPromiseRef = useRef(Promise.resolve());
+  const activityStartFailedRef = useRef(false);
 
   useEffect(() => {
-    if (dayNum) {
-      setIsDayDone(isDayCompletedLocally(dayNum));
+    let active = true;
+    if (!Number.isInteger(dayNum) || dayNum < 1 || dayNum > 19) return undefined;
+
+    if (!dayData || getDayStatus(dayData.date, ownerTestDate) === 'LOCKED') {
+      setVideoAvailability({ loading: false, available: false, videoUrl: null, error: '' });
+      return undefined;
     }
-  }, [dayNum]);
+
+    setVideoAvailability({ loading: true, available: false, videoUrl: null, error: '' });
+    apiFetch(`/api/videos/${dayNum}/details`)
+      .then((result) => {
+        if (!active) return;
+        setVideoAvailability({
+          loading: false,
+          available: result.available === true && typeof result.videoUrl === 'string',
+          videoUrl: typeof result.videoUrl === 'string' ? result.videoUrl : null,
+          error: '',
+        });
+      })
+      .catch((error) => {
+        if (!active) return;
+        setVideoAvailability({
+          loading: false,
+          available: false,
+          videoUrl: null,
+          error: error.message || 'Could not check this surprise.',
+        });
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [dayNum, dayData, ownerTestDate]);
 
   // Handle page unload or refresh: mark session as incomplete so server keeps chunks safe
   useEffect(() => {
@@ -86,7 +130,7 @@ export default function DailySurprise() {
     );
   }
 
-  const status = getDayStatus(dayData.date);
+  const status = getDayStatus(dayData.date, ownerTestDate);
 
   // Enforce security / date locking: if today < surprise date, refuse access
   if (status === 'LOCKED') {
@@ -122,20 +166,49 @@ export default function DailySurprise() {
     );
   }
 
-  // Handle User choosing to record
-  const handleStartWithRecording = () => {
-    setRecordReaction(true);
+  const handleStartExperience = () => {
+    if (!videoAvailability.available || !videoAvailability.videoUrl) return;
+    setRecordingError('');
+    setActivityError('');
+    videoEndedRef.current = false;
+    hasReportedVideoStartRef.current = false;
+    activityStartFailedRef.current = false;
+    activityStartPromiseRef.current = Promise.resolve();
+    sessionIdRef.current = typeof crypto !== 'undefined' && crypto.randomUUID
+      ? crypto.randomUUID()
+      : `sess_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+    setIsRecordingReady(isOwner);
+    setRecordReaction(!isOwner);
     setPhase('watching');
   };
 
-  // Handle User choosing to watch without recording
-  const handleStartWithoutRecording = () => {
-    setRecordReaction(false);
-    setPhase('watching');
+  const handleVideoStarted = () => {
+    if (isOwner || hasReportedVideoStartRef.current) return;
+    hasReportedVideoStartRef.current = true;
+    activityStartPromiseRef.current = recordVideoSeen(dayData.day)
+      .then(() => recordVideoWatching(dayData.day))
+      .catch((error) => {
+        activityStartFailedRef.current = true;
+        setActivityError('Could not save when this video started playing.');
+        console.error('Could not save video seen event:', error);
+      });
   };
 
   // Triggered when daily video ends
   const handleVideoEnded = async () => {
+    videoEndedRef.current = true;
+    if (!isOwner) {
+      try {
+        await activityStartPromiseRef.current;
+        if (activityStartFailedRef.current) {
+          throw new Error('The video start event was not saved.');
+        }
+        await recordVideoCompleted(dayData.day);
+      } catch (error) {
+        setActivityError('The video ended, but viewing activity could not be saved.');
+        console.error('Could not save video completion event:', error);
+      }
+    }
     if (recordReaction && recorderRef.current) {
       setIsFinalizing(true);
       setUploadMessage('Saving your final reaction chunk with love...');
@@ -148,18 +221,14 @@ export default function DailySurprise() {
   // Triggered when recorder completes finalization
   const handleRecordingFinalized = (finalReaction) => {
     setIsFinalizing(false);
-    setUploadMessage('Your reaction is safely preserved in our birthday keepsake ❤️');
-    setPhase('completed');
-  };
-
-  // Manual stop recording trigger
-  const handleManualStop = async () => {
-    if (recordReaction && recorderRef.current) {
-      setIsFinalizing(true);
-      setUploadMessage('Saving your reaction...');
-      await recorderRef.current.stopAndFinalize();
-    } else {
+    if (finalReaction) {
+      setUploadMessage('Your reaction is safely preserved in our birthday keepsake ❤️');
       setPhase('completed');
+    } else {
+      setRecordingError('The reaction could not be saved. Please record again to continue.');
+      setRecordReaction(false);
+      setIsRecordingReady(false);
+      setPhase('consent');
     }
   };
 
@@ -181,6 +250,7 @@ export default function DailySurprise() {
           <Calendar className="w-3.5 h-3.5 text-rose-500" />
           <span>{formatReadableDate(dayData.date)}</span>
         </div>
+        <SessionActions />
       </header>
 
       {/* Main Content Sections based on phase */}
@@ -210,47 +280,61 @@ export default function DailySurprise() {
               <p className="text-gray-600 text-sm sm:text-base italic mb-8">
                 "{dayData.subtitle}"
               </p>
+              {recordingError && <p role="alert" className="text-sm text-red-700 mb-4">{recordingError}</p>}
 
-              {/* Romantic Camera Consent Prompt */}
-              <div className="bg-rose-50/90 rounded-2xl p-5 mb-8 text-left border border-rose-200/80">
-                <div className="flex items-start gap-3">
-                  <div className="p-2 rounded-xl bg-white text-rose-500 shadow-sm shrink-0 mt-0.5">
-                    <Video className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <h4 className="font-semibold text-rose-950 text-sm mb-1">
-                      Before you watch today's surprise...
-                    </h4>
-                    <p className="text-xs sm:text-sm text-gray-700 leading-relaxed mb-2">
-                      I'd love to see your genuine reaction. ❤️ With your permission, your smile will be saved continuously while you watch today's video.
-                    </p>
-                    <p className="text-[11px] text-gray-500">
-                      Saved safely into your private birthday keepsake vault.
-                    </p>
-                  </div>
+              {videoAvailability.loading ? (
+                <p className="text-sm text-rose-700 mb-8">Preparing today's surprise...</p>
+              ) : videoAvailability.error ? (
+                <p role="alert" className="text-sm text-red-700 mb-8">
+                  We couldn't check today's surprise. Please refresh the page and try again.
+                </p>
+              ) : !videoAvailability.available ? (
+                <div className="bg-rose-50/90 rounded-2xl p-5 mb-8 border border-rose-200/80">
+                  <h4 className="font-semibold text-rose-950 text-sm mb-1">Coming Soon ❤️</h4>
+                  <p className="text-sm text-gray-700">This surprise is getting ready. Please come back when it is available.</p>
                 </div>
-              </div>
+              ) : (
+                <>
+                  {/* Romantic Camera Consent Prompt */}
+                  <div className="bg-rose-50/90 rounded-2xl p-5 mb-8 text-left border border-rose-200/80">
+                    <div className="flex items-start gap-3">
+                      <div className="p-2 rounded-xl bg-white text-rose-500 shadow-sm shrink-0 mt-0.5">
+                        <Video className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <h4 className="font-semibold text-rose-950 text-sm mb-1">
+                          {isOwner ? 'System preview' : 'Before your surprise begins ❤️'}
+                        </h4>
+                        <p className="text-xs sm:text-sm text-gray-700 leading-relaxed mb-2">
+                          {isOwner
+                            ? 'Watch the daily video without camera or microphone access.'
+                            : 'I need access to your camera and microphone so I can capture your reaction.'}
+                        </p>
+                        {!isOwner && (
+                          <>
+                            <p className="text-xs text-gray-700">Please enable:</p>
+                            <p className="text-xs text-gray-700">📷 Camera</p>
+                            <p className="text-xs text-gray-700">🎤 Microphone</p>
+                            <p className="text-[11px] text-gray-500 mt-2">Your reaction is part of the surprise ❤️</p>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  </div>
 
-              {/* Action Buttons */}
-              <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
-                <button
-                  onClick={handleStartWithRecording}
-                  type="button"
-                  className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-6 py-3.5 rounded-full bg-gradient-to-r from-rose-500 to-pink-500 hover:from-rose-600 hover:to-pink-600 text-white text-sm font-semibold shadow-romantic hover:shadow-romantic-lg transition-all duration-300 hover:scale-[1.02]"
-                >
-                  <Video className="w-4 h-4" />
-                  <span>Record My Reaction ❤️</span>
-                </button>
-
-                <button
-                  onClick={handleStartWithoutRecording}
-                  type="button"
-                  className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-6 py-3.5 rounded-full bg-white hover:bg-gray-50 text-gray-700 text-sm font-medium border border-rose-200/80 transition-all shadow-sm"
-                >
-                  <Eye className="w-4 h-4 text-gray-400" />
-                  <span>Watch Without Recording</span>
-                </button>
-              </div>
+                  {/* Action Buttons */}
+                  <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
+                    <button
+                      onClick={handleStartExperience}
+                      type="button"
+                      className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-6 py-3.5 rounded-full bg-gradient-to-r from-rose-500 to-pink-500 hover:from-rose-600 hover:to-pink-600 text-white text-sm font-semibold shadow-romantic hover:shadow-romantic-lg transition-all duration-300 hover:scale-[1.02]"
+                    >
+                      <Video className="w-4 h-4" />
+                      <span>{isOwner ? 'Watch Surprise' : recordingError ? 'Try Again' : 'Enable Camera & Microphone'}</span>
+                    </button>
+                  </div>
+                </>
+              )}
             </motion.div>
           )}
 
@@ -274,11 +358,20 @@ export default function DailySurprise() {
               </div>
 
               {/* Independent Daily Video Player */}
-              <VideoPlayer
-                videoSrc={dayData.video}
-                onEnded={handleVideoEnded}
-                title={dayData.title}
-              />
+              {(isOwner || isRecordingReady) && videoAvailability.available && videoAvailability.videoUrl ? (
+                <VideoPlayer
+                  videoSrc={`${API_BASE}${videoAvailability.videoUrl}${isOwner ? '' : `?sessionId=${encodeURIComponent(sessionIdRef.current)}`}`}
+                  onPlaybackStarted={handleVideoStarted}
+                  onEnded={handleVideoEnded}
+                  allowSimulation={false}
+                  allowSeeking={isOwner}
+                  title={dayData.title}
+                />
+              ) : (
+                <div className="aspect-video w-full rounded-3xl bg-white/80 border border-rose-200 flex items-center justify-center text-sm text-rose-700">
+                  {recordingError ? 'Camera and microphone are required to continue.' : 'Starting your reaction recording...'}
+                </div>
+              )}
 
               {/* Independent Continuous Camera Recorder */}
               {recordReaction && (
@@ -288,32 +381,24 @@ export default function DailySurprise() {
                   dayNumber={dayData.day}
                   date={dayData.date}
                   sessionId={sessionIdRef.current}
+                  onRecordingReady={() => setIsRecordingReady(true)}
                   onRecordingFinalized={handleRecordingFinalized}
-                  onStopRequested={handleManualStop}
-                  onError={(msg) => console.warn(msg)}
+                  onError={(msg) => {
+                    setRecordingError(msg);
+                    setIsRecordingReady(false);
+                    setRecordReaction(false);
+                    setPhase('consent');
+                  }}
                 />
               )}
+              {recordingError && !isOwner && (
+                <div className="text-center">
+                  <p role="alert" className="text-sm text-red-700 mb-2">{recordingError}</p>
+                  <button type="button" onClick={() => setPhase('consent')} className="text-sm font-semibold text-rose-700 underline">Try recording again</button>
+                </div>
+              )}
 
-              {/* Manual finish/stop button */}
-              <div className="text-center pt-2 flex items-center justify-center gap-4">
-                {recordReaction ? (
-                  <button
-                    onClick={handleManualStop}
-                    disabled={isFinalizing}
-                    className="inline-flex items-center gap-1.5 text-xs text-rose-600 hover:text-rose-700 font-medium bg-white/80 px-4 py-2 rounded-full border border-rose-200 shadow-sm"
-                  >
-                    <StopCircle className="w-3.5 h-3.5 text-rose-500" />
-                    <span>{isFinalizing ? 'Saving reaction...' : 'Finish Watching & Save Reaction ❤️'}</span>
-                  </button>
-                ) : (
-                  <button
-                    onClick={() => setPhase('completed')}
-                    className="text-xs text-rose-600/90 hover:text-rose-700 underline"
-                  >
-                    Finished watching? Click to complete day ❤️
-                  </button>
-                )}
-              </div>
+              {activityError && <p role="alert" className="text-center text-sm text-red-700">{activityError}</p>}
             </motion.div>
           )}
 
@@ -335,7 +420,7 @@ export default function DailySurprise() {
               </motion.div>
 
               <span className="text-xs uppercase tracking-widest font-bold text-emerald-600 mb-1 block">
-                DAY {dayData.day} COMPLETED
+                {`DAY ${dayData.day} COMPLETED`}
               </span>
 
               <h2 className="font-serif text-3xl font-bold text-gray-900 mb-2">
@@ -352,6 +437,7 @@ export default function DailySurprise() {
                   <span>{uploadMessage}</span>
                 </div>
               )}
+              {activityError && <p role="alert" className="mb-4 text-sm text-red-700">{activityError}</p>}
 
               <button
                 onClick={() => navigate('/journey')}
@@ -368,9 +454,6 @@ export default function DailySurprise() {
       <footer className="relative z-10 text-center text-xs text-rose-900/60 font-light">
         19 Days of Us • Crafted with all my love ❤️
       </footer>
-
-      {/* Dev Mode Date Switcher */}
-      <DevBanner onDateChange={() => {}} />
     </div>
   );
 }

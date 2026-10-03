@@ -1,8 +1,12 @@
 import fs from 'fs';
 import path from 'path';
+import { Readable } from 'stream';
+import { pipeline } from 'stream/promises';
 import { fileURLToPath } from 'url';
 import cloudinary, { isCloudinaryConfigured } from '../config/cloudinary.js';
 import Reaction from '../models/Reaction.js';
+import JourneyActivity from '../models/JourneyActivity.js';
+import { getJourneyDateString, getTodayInKolkata } from '../utils/dateUtils.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -17,8 +21,92 @@ if (!fs.existsSync(sessionsDir)) {
   fs.mkdirSync(sessionsDir, { recursive: true });
 }
 
-// In-memory fallback if MongoDB is not connected
-let memoryReactions = [];
+function safeErrorMessage(error) {
+  let message = error instanceof Error ? error.message : String(error);
+  const sensitiveKeys = [
+    'OWNER_PASSWORD',
+    'BOYFRIEND_PASSWORD',
+    'SESSION_SECRET',
+    'CLOUDINARY_API_KEY',
+    'CLOUDINARY_API_SECRET',
+    'MONGODB_URI',
+  ];
+
+  for (const key of sensitiveKeys) {
+    const value = process.env[key];
+    if (value) message = message.split(value).join('[REDACTED]');
+  }
+
+  const mongoUri = process.env.MONGODB_URI;
+  if (mongoUri) {
+    try {
+      const parsedUri = new URL(mongoUri);
+      for (const credential of [parsedUri.username, parsedUri.password]) {
+        if (credential) {
+          message = message.split(decodeURIComponent(credential)).join('[REDACTED]');
+        }
+      }
+    } catch {
+      // The URI itself is still removed above when it appears in an error.
+    }
+  }
+
+  return message.slice(0, 500);
+}
+
+function logReactionChunkUploadFailure(req, error) {
+  console.error('❌ Reaction chunk upload failed', {
+    User: req.user?.userId || 'unknown',
+    Day: req.body?.dayNumber || 'unknown',
+    Session: req.params?.sessionId || 'unknown',
+    Chunk: req.body?.chunkNumber || 'unknown',
+    Error: safeErrorMessage(error),
+  });
+}
+
+export function handleReactionChunkUploadError(error, req, res, next) {
+  if (res.headersSent) return next(error);
+  logReactionChunkUploadFailure(req, error);
+
+  const statusCode = Number.isInteger(error.statusCode) && error.statusCode >= 400 && error.statusCode < 500
+    ? error.statusCode
+    : error.name === 'MulterError'
+      ? 400
+      : 500;
+  return res.status(statusCode).json({
+    success: false,
+    message: 'Reaction chunk upload failed',
+  });
+}
+
+function streamSessionChunks(chunkFiles, sessionPath) {
+  return Readable.from((async function* () {
+    for (const file of chunkFiles) {
+      const chunkStream = fs.createReadStream(path.join(sessionPath, file));
+      for await (const chunk of chunkStream) yield chunk;
+    }
+  })());
+}
+
+async function markReactionActivity(user, dayNumber, sessionId, uploaded = false) {
+  await JourneyActivity.findOneAndUpdate(
+    { userId: user.userId, dayNumber },
+    {
+      $set: {
+        reactionRecorded: true,
+        reactionSessionId: sessionId,
+        ...(uploaded ? { reactionUploaded: true } : {}),
+      },
+      $setOnInsert: {
+        userId: user.userId,
+        role: 'BOYFRIEND',
+        dayNumber,
+        date: getJourneyDateString(dayNumber),
+      },
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true }
+  );
+}
 
 /**
  * 1. Create a Recording Session
@@ -29,8 +117,21 @@ export async function createRecordingSession(req, res) {
   try {
     const { sessionId, dayNumber, date } = req.body;
 
-    if (!sessionId || !dayNumber || !date) {
+    const parsedDay = Number(dayNumber);
+    const canonicalDate = getJourneyDateString(parsedDay);
+    if (!sessionId || !Number.isInteger(parsedDay) || parsedDay < 1 || parsedDay > 18 || date !== canonicalDate) {
       return res.status(400).json({ error: 'sessionId, dayNumber, and date are required.' });
+    }
+    if (!/^[a-zA-Z0-9_-]+$/.test(sessionId)) {
+      return res.status(400).json({ error: 'Invalid sessionId.' });
+    }
+    if (canonicalDate > getTodayInKolkata()) {
+      return res.status(403).json({ error: 'This surprise is not available yet.' });
+    }
+
+    const existingSession = await Reaction.findOne({ sessionId });
+    if (existingSession && existingSession.userId !== req.user.userId) {
+      return res.status(409).json({ error: 'Session ID is already in use.' });
     }
 
     // Ensure session directory exists for storing chunks
@@ -41,8 +142,10 @@ export async function createRecordingSession(req, res) {
 
     const sessionData = {
       sessionId,
-      dayNumber: Number(dayNumber),
-      date,
+      userId: req.user.userId,
+      role: 'BOYFRIEND',
+      dayNumber: parsedDay,
+      date: canonicalDate,
       status: 'recording',
       startedAt: new Date(),
       chunksUploaded: 0,
@@ -50,32 +153,19 @@ export async function createRecordingSession(req, res) {
       cloudinaryPublicId: '',
     };
 
-    // Save in MongoDB if available
-    try {
-      const doc = await Reaction.findOneAndUpdate(
-        { sessionId },
-        sessionData,
-        { upsert: true, new: true, setDefaultsOnInsert: true }
-      );
+    const doc = await Reaction.findOneAndUpdate(
+      { sessionId, userId: req.user.userId },
+      sessionData,
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
 
-      return res.status(201).json({
-        success: true,
-        message: 'Recording session created ❤️',
-        session: doc,
-      });
-    } catch (dbErr) {
-      console.warn('MongoDB session save fallback (in-memory):', dbErr.message);
-      memoryReactions = memoryReactions.filter((r) => r.sessionId !== sessionId);
-      memoryReactions.push(sessionData);
-
-      return res.status(201).json({
-        success: true,
-        message: 'Recording session created (cached) ❤️',
-        session: sessionData,
-      });
-    }
+    return res.status(201).json({
+      success: true,
+      message: 'Recording session created ❤️',
+      session: doc,
+    });
   } catch (err) {
-    console.error('Error creating recording session:', err);
+    console.error('Error creating recording session:', safeErrorMessage(err));
     return res.status(500).json({ error: 'Failed to create recording session.' });
   }
 }
@@ -176,6 +266,10 @@ export async function uploadReactionChunk(req, res) {
       });
     }
 
+    const session = await Reaction.findOne({ sessionId, userId: req.user.userId, status: 'recording' });
+    if (!session) return res.status(404).json({ success: false, error: 'Recording session not found.' });
+    if (Number(dayNumber) !== session.dayNumber) return res.status(400).json({ success: false, error: 'Day number does not match its recording session.' });
+
     if (!file) {
       return res.status(400).json({
         success: false,
@@ -268,7 +362,7 @@ export async function uploadReactionChunk(req, res) {
     try {
       const updatedDoc =
         await Reaction.findOneAndUpdate(
-          { sessionId },
+          { sessionId, userId: req.user.userId },
 
           {
             $set: {
@@ -276,21 +370,17 @@ export async function uploadReactionChunk(req, res) {
                 actualChunkCount,
             },
 
-            $setOnInsert: {
-              sessionId,
-              dayNumber: dayNumber
-                ? Number(dayNumber)
-                : 1,
-              status: 'recording',
-              startedAt: new Date(),
-            },
           },
 
           {
-            upsert: true,
             new: true,
           }
         );
+
+      if (!updatedDoc) {
+        return res.status(404).json({ success: false, error: 'Recording session not found.' });
+      }
+      await markReactionActivity(req.user, updatedDoc.dayNumber, sessionId);
 
       console.log(
         `✅ MongoDB updated. chunksUploaded=${actualChunkCount}`
@@ -304,37 +394,17 @@ export async function uploadReactionChunk(req, res) {
           updatedDoc.chunksUploaded,
       });
     } catch (dbErr) {
-      console.error(
-        '⚠️ MongoDB chunk update failed:',
-        dbErr
-      );
-
-      /*
-       * The file has already been safely saved.
-       * Return success for the upload itself.
-       */
-      return res.status(200).json({
-        success: true,
-        sessionId,
-        chunkNumber: chunkIndex,
-        chunksUploaded:
-          actualChunkCount,
-        warning:
-          'Chunk saved locally but MongoDB update failed.',
+      logReactionChunkUploadFailure(req, dbErr);
+      return res.status(500).json({
+        success: false,
+        message: 'Reaction chunk upload failed',
       });
     }
   } catch (err) {
-    console.error(
-      '❌ ERROR SAVING REACTION CHUNK'
-    );
-
-    console.error(err);
-
+    logReactionChunkUploadFailure(req, err);
     return res.status(500).json({
       success: false,
-      error:
-        err.message ||
-        'Failed to save reaction chunk.',
+      message: 'Reaction chunk upload failed',
     });
   }
 }
@@ -350,8 +420,25 @@ export async function finalizeReactionSession(req, res) {
     const { sessionId } = req.params;
     const { dayNumber, date } = req.body;
 
-    if (!sessionId) {
+    if (!sessionId || !/^[a-zA-Z0-9_-]+$/.test(sessionId)) {
       return res.status(400).json({ error: 'sessionId param is required.' });
+    }
+
+    const session = await Reaction.findOne({ sessionId, userId: req.user.userId });
+    if (!session) return res.status(404).json({ error: 'Recording session not found.' });
+    if (Number(dayNumber) !== session.dayNumber || date !== session.date) {
+      return res.status(400).json({ error: 'Recording metadata does not match its session.' });
+    }
+    if (session.status === 'completed') {
+      await markReactionActivity(req.user, session.dayNumber, sessionId, true);
+      return res.json({
+        success: true,
+        message: 'Reaction recording is already finalized.',
+        reaction: { ...session.toObject(), reactionVideoUrl: '' },
+      });
+    }
+    if (session.status !== 'recording') {
+      return res.status(409).json({ error: 'This recording session is incomplete and cannot be finalized.' });
     }
 
     const sessionPath = path.join(sessionsDir, sessionId);
@@ -359,106 +446,101 @@ export async function finalizeReactionSession(req, res) {
     // Gather all chunks for this session
     let chunkFiles = [];
     if (fs.existsSync(sessionPath)) {
-      chunkFiles = fs.readdirSync(sessionPath).filter((f) => f.startsWith('chunk_'));
-      chunkFiles.sort(); // Lexicographical sort works because of 6-digit zero padding
+      chunkFiles = fs.readdirSync(sessionPath)
+        .filter((file) => /^chunk_\d+\.webm$/.test(file))
+        .sort();
     }
 
-    let finalBuffer = null;
-    if (chunkFiles.length > 0) {
-      const buffers = chunkFiles.map((file) => fs.readFileSync(path.join(sessionPath, file)));
-      finalBuffer = Buffer.concat(buffers);
+    if (chunkFiles.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'No video chunks were uploaded. The recording could not be finalized.',
+        sessionId,
+        chunksFound: 0,
+      });
     }
-    if (!finalBuffer || finalBuffer.length === 0) {
-  console.error(
-    `❌ No video chunks found for session ${sessionId}`
-  );
 
-  return res.status(400).json({
-    success: false,
-    error:
-      'No video chunks were uploaded. The recording could not be finalized.',
-    sessionId,
-    chunksFound: chunkFiles.length,
-  });
-}
-
-    let videoUrl = '';
     let publicId = '';
-
-    // If we have video data, try uploading to Cloudinary
-    if (finalBuffer && isCloudinaryConfigured()) {
+    let localFileName = '';
+    let storageType = 'local';
+    if (isCloudinaryConfigured()) {
       try {
         const uploadResult = await new Promise((resolve, reject) => {
           const stream = cloudinary.uploader.upload_stream(
             {
               resource_type: 'video',
+              type: 'authenticated',
               folder: 'romantic_reactions',
-              public_id: `reaction_day_${dayNumber || 'x'}_${sessionId}`,
+              public_id: `reaction_day_${session.dayNumber}_${sessionId}`,
             },
             (error, uploaded) => {
               if (error) return reject(error);
               resolve(uploaded);
             }
           );
-          stream.end(finalBuffer);
+          const source = streamSessionChunks(chunkFiles, sessionPath);
+          source.on('error', reject);
+          stream.on('error', reject);
+          source.pipe(stream);
         });
 
-        videoUrl = uploadResult.secure_url;
+        if (!uploadResult?.public_id) throw new Error('Cloudinary returned no asset ID.');
         publicId = uploadResult.public_id;
+        session.videoFormat = uploadResult.format || 'webm';
+        storageType = 'cloudinary';
       } catch (cloudErr) {
-        console.warn('Cloudinary upload error, using local fallback:', cloudErr.message);
+        await Reaction.updateOne(
+          { sessionId, userId: req.user.userId, status: 'recording' },
+          { $set: { status: 'incomplete' } }
+        );
+        console.error('Cloudinary reaction upload failed:', safeErrorMessage(cloudErr));
+        return res.status(502).json({ error: 'Reaction chunks are saved, but Cloudinary could not finalize the recording.' });
       }
     }
 
-    // Local fallback: save the stitched file in uploads/
-    if (finalBuffer && !videoUrl) {
-      const finalFileName = `reaction-day-${dayNumber || 1}-${sessionId}.webm`;
-      const finalFilePath = path.join(uploadsDir, finalFileName);
-      fs.writeFileSync(finalFilePath, finalBuffer);
-      videoUrl = `/uploads/${finalFileName}`;
-      publicId = finalFileName;
+    if (storageType === 'local') {
+      localFileName = `reaction-day-${session.dayNumber}-${sessionId}.webm`;
+      await pipeline(
+        streamSessionChunks(chunkFiles, sessionPath),
+        fs.createWriteStream(path.join(uploadsDir, localFileName))
+      );
+      publicId = localFileName;
+      session.videoFormat = 'webm';
     }
 
     // Update session record in MongoDB
     const updateData = {
       status: 'completed',
       completedAt: new Date(),
-      reactionVideoUrl: videoUrl,
+      reactionVideoUrl: '',
       cloudinaryPublicId: publicId,
+      storageType,
+      localFileName,
+      videoFormat: session.videoFormat || 'webm',
     };
     if (dayNumber) updateData.dayNumber = Number(dayNumber);
     if (date) updateData.date = date;
 
     try {
       const finalizedDoc = await Reaction.findOneAndUpdate(
-        { sessionId },
+        { sessionId, userId: req.user.userId },
         updateData,
-        { new: true, upsert: true }
+        { new: true }
       );
+      if (!finalizedDoc) return res.status(404).json({ error: 'Recording session not found.' });
+      await markReactionActivity(req.user, session.dayNumber, sessionId, true);
 
       return res.status(200).json({
         success: true,
         message: 'Reaction recording finalized and saved ❤️',
-        reaction: finalizedDoc,
+        reaction: { ...finalizedDoc.toObject(), reactionVideoUrl: '' },
       });
     } catch (dbErr) {
-      // Memory fallback
-      let memDoc = memoryReactions.find((r) => r.sessionId === sessionId);
-      if (!memDoc) {
-        memDoc = { sessionId, dayNumber: Number(dayNumber) || 1, date: date || '', ...updateData };
-        memoryReactions.push(memDoc);
-      } else {
-        Object.assign(memDoc, updateData);
-      }
-
-      return res.status(200).json({
-        success: true,
-        message: 'Reaction recording finalized (cached) ❤️',
-        reaction: memDoc,
-      });
+      console.error('Could not persist finalized reaction:', safeErrorMessage(dbErr));
+      return res.status(500).json({ error: 'Reaction was stored but could not be recorded in MongoDB.' });
     }
   } catch (err) {
-    console.error('Error finalizing reaction session:', err);
+    console.error('Error finalizing reaction session:', safeErrorMessage(err));
     return res.status(500).json({ error: 'Failed to finalize reaction session.' });
   }
 }
@@ -476,7 +558,7 @@ export async function markSessionIncomplete(req, res) {
 
     try {
       const updatedDoc = await Reaction.findOneAndUpdate(
-        { sessionId, status: 'recording' },
+        { sessionId, userId: req.user.userId, status: 'recording' },
         { status: 'incomplete' },
         { new: true }
       );
@@ -486,14 +568,7 @@ export async function markSessionIncomplete(req, res) {
         session: updatedDoc,
       });
     } catch (dbErr) {
-      const mem = memoryReactions.find((r) => r.sessionId === sessionId);
-      if (mem && mem.status === 'recording') {
-        mem.status = 'incomplete';
-      }
-      return res.status(200).json({
-        success: true,
-        message: 'Session marked as incomplete (cached).',
-      });
+      return res.status(500).json({ error: 'Could not update the recording session.' });
     }
   } catch (err) {
     return res.status(500).json({ error: 'Failed to mark session incomplete.' });
@@ -508,16 +583,20 @@ export async function uploadReaction(req, res) {
   try {
     const { dayNumber, date } = req.body;
     const file = req.file;
+    const parsedDay = Number(dayNumber);
+    const canonicalDate = getJourneyDateString(parsedDay);
 
-    if (!dayNumber || !date) {
+    if (!Number.isInteger(parsedDay) || parsedDay < 1 || parsedDay > 18 || date !== canonicalDate) {
       return res.status(400).json({ error: 'dayNumber and date are required.' });
+    }
+    if (canonicalDate > getTodayInKolkata()) {
+      return res.status(403).json({ error: 'This surprise is not available yet.' });
     }
 
     if (!file) {
       return res.status(400).json({ error: 'No video file provided.' });
     }
 
-    let videoUrl = '';
     let publicId = '';
 
     if (isCloudinaryConfigured()) {
@@ -526,6 +605,7 @@ export async function uploadReaction(req, res) {
           const stream = cloudinary.uploader.upload_stream(
             {
               resource_type: 'video',
+              type: 'authenticated',
               folder: 'romantic_reactions',
               public_id: `reaction_day_${dayNumber}_${Date.now()}`,
             },
@@ -537,58 +617,60 @@ export async function uploadReaction(req, res) {
           stream.end(file.buffer);
         });
 
-        videoUrl = result.secure_url;
         publicId = result.public_id;
       } catch (cloudErr) {
-        console.warn('Cloudinary upload failed, falling back to local storage:', cloudErr.message);
+        console.warn('Cloudinary upload failed, falling back to local storage:', safeErrorMessage(cloudErr));
       }
     }
 
-    if (!videoUrl) {
+    let localFileName = '';
+    let storageType = 'cloudinary';
+    if (!publicId) {
       const ext = file.mimetype.includes('mp4') ? 'mp4' : 'webm';
       const filename = `reaction-day-${dayNumber}-${Date.now()}.${ext}`;
       const filePath = path.join(uploadsDir, filename);
       fs.writeFileSync(filePath, file.buffer);
-      videoUrl = `/uploads/${filename}`;
+      localFileName = filename;
       publicId = filename;
+      storageType = 'local';
     }
 
     const sessionId = `legacy_${Date.now()}`;
     const reactionData = {
       sessionId,
-      dayNumber: Number(dayNumber),
-      date,
+      userId: req.user.userId,
+      role: 'BOYFRIEND',
+      dayNumber: parsedDay,
+      date: canonicalDate,
       status: 'completed',
       startedAt: new Date(),
       completedAt: new Date(),
       chunksUploaded: 1,
-      reactionVideoUrl: videoUrl,
+      reactionVideoUrl: '',
       cloudinaryPublicId: publicId,
+      storageType,
+      localFileName,
+      videoFormat: file.mimetype.includes('mp4') ? 'mp4' : 'webm',
     };
 
     try {
       const savedDoc = await Reaction.findOneAndUpdate(
-        { dayNumber: Number(dayNumber) },
+        { dayNumber: parsedDay, userId: req.user.userId },
         reactionData,
         { upsert: true, new: true, setDefaultsOnInsert: true }
       );
+      await markReactionActivity(req.user, parsedDay, sessionId, true);
       return res.status(201).json({
         success: true,
         message: 'Reaction uploaded successfully ❤️',
         reaction: savedDoc,
       });
     } catch (mongoErr) {
-      memoryReactions = memoryReactions.filter((r) => r.dayNumber !== Number(dayNumber));
-      memoryReactions.push(reactionData);
-
-      return res.status(201).json({
-        success: true,
-        message: 'Reaction uploaded successfully (cached) ❤️',
-        reaction: reactionData,
-      });
+      console.error('Could not persist legacy reaction in MongoDB:', safeErrorMessage(mongoErr));
+      return res.status(500).json({ error: 'Reaction upload could not be saved in MongoDB.' });
     }
   } catch (error) {
-    console.error('Upload reaction error:', error);
+    console.error('Upload reaction error:', safeErrorMessage(error));
     return res.status(500).json({ error: 'Failed to process reaction upload.' });
   }
 }
@@ -599,7 +681,7 @@ export async function uploadReaction(req, res) {
  */
 export async function getAllReactions(req, res) {
   try {
-    const reactions = await Reaction.find().sort({ dayNumber: 1, createdAt: -1 });
+    const reactions = await Reaction.find({ role: 'BOYFRIEND' }).sort({ dayNumber: 1, createdAt: -1 });
 
     // Group by dayNumber to return the latest completed (or latest) reaction per day
     const dayMap = {};
@@ -614,19 +696,10 @@ export async function getAllReactions(req, res) {
 
     const reactionList = Object.values(dayMap).sort((a, b) => a.dayNumber - b.dayNumber);
 
-    return res.json({ success: true, reactions: reactionList });
+    return res.json({ success: true, reactions: reactionList.map((reaction) => ({ ...reaction.toObject(), reactionVideoUrl: '' })) });
   } catch (error) {
-    // If DB is offline, return memory cache
-    const dayMap = {};
-    memoryReactions.forEach((r) => {
-      const day = r.dayNumber;
-      if (!dayMap[day]) {
-        dayMap[day] = r;
-      } else if (r.status === 'completed' && dayMap[day].status !== 'completed') {
-        dayMap[day] = r;
-      }
-    });
-    return res.json({ success: true, reactions: Object.values(dayMap) });
+    console.error('Could not load reactions from MongoDB:', safeErrorMessage(error));
+    return res.status(500).json({ error: 'Could not load reactions.' });
   }
 }
 
@@ -637,23 +710,69 @@ export async function getAllReactions(req, res) {
 export async function getReactionByDay(req, res) {
   try {
     const day = Number(req.params.day);
+    if (!Number.isInteger(day) || day < 1 || day > 18) {
+      return res.status(400).json({ error: 'Invalid journey day.' });
+    }
     // Find completed first, or latest
-    let reaction = await Reaction.findOne({ dayNumber: day, status: 'completed' });
+    let reaction = await Reaction.findOne({ dayNumber: day, role: 'BOYFRIEND', status: 'completed' });
     if (!reaction) {
-      reaction = await Reaction.findOne({ dayNumber: day }).sort({ createdAt: -1 });
+      reaction = await Reaction.findOne({ dayNumber: day, role: 'BOYFRIEND' }).sort({ createdAt: -1 });
     }
 
-    if (!reaction) {
-      const memory = memoryReactions.find((r) => r.dayNumber === day && r.status === 'completed') ||
-        memoryReactions.find((r) => r.dayNumber === day);
-      if (memory) return res.json({ success: true, reaction: memory });
-      return res.status(404).json({ error: 'No reaction found for this day.' });
-    }
-    return res.json({ success: true, reaction });
+    if (!reaction) return res.status(404).json({ error: 'No reaction found for this day.' });
+    return res.json({ success: true, reaction: { ...reaction.toObject(), reactionVideoUrl: '' } });
   } catch (error) {
-    const memory = memoryReactions.find((r) => r.dayNumber === Number(req.params.day));
-    if (memory) return res.json({ success: true, reaction: memory });
+    console.error('Could not fetch reaction from MongoDB:', safeErrorMessage(error));
     return res.status(500).json({ error: 'Could not fetch reaction.' });
+  }
+}
+
+export async function getReactionVideo(req, res) {
+  try {
+    const reaction = await Reaction.findOne({
+      sessionId: req.params.sessionId,
+      role: 'BOYFRIEND',
+      status: 'completed',
+    });
+    if (!reaction) return res.status(404).json({ error: 'Reaction video not found.' });
+
+    res.set('Cache-Control', 'private, no-store');
+    res.set('Vary', 'Cookie');
+
+    if (reaction.storageType === 'cloudinary' && reaction.cloudinaryPublicId && isCloudinaryConfigured()) {
+      const signedUrl = cloudinary.utils.private_download_url(
+        reaction.cloudinaryPublicId,
+        reaction.videoFormat || 'webm',
+        {
+          resource_type: 'video',
+          type: 'authenticated',
+          expires_at: Math.floor(Date.now() / 1000) + 300,
+        }
+      );
+      const upstream = await fetch(signedUrl, {
+        headers: req.headers.range ? { Range: req.headers.range } : {},
+      });
+      if (!upstream.ok && upstream.status !== 206) {
+        return res.status(502).json({ error: 'Could not load reaction video from private storage.' });
+      }
+      for (const header of ['content-type', 'content-length', 'content-range', 'accept-ranges']) {
+        const value = upstream.headers.get(header);
+        if (value) res.set(header, value);
+      }
+      res.status(upstream.status);
+      return Readable.fromWeb(upstream.body).pipe(res);
+    }
+
+    const safeFileName = path.basename(reaction.localFileName || '');
+    if (!safeFileName || safeFileName !== reaction.localFileName) {
+      return res.status(404).json({ error: 'Reaction video is unavailable.' });
+    }
+    return res.sendFile(path.join(uploadsDir, safeFileName), {
+      headers: { 'Cache-Control': 'private, no-store', Vary: 'Cookie' },
+    });
+  } catch (error) {
+    console.error('Could not serve private reaction video:', safeErrorMessage(error));
+    return res.status(500).json({ error: 'Could not load reaction video.' });
   }
 }
 
@@ -667,14 +786,9 @@ export async function validateDayAccess(req, res) {
     return res.status(400).json({ error: 'Invalid day number.' });
   }
 
-  const todayInKolkata = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Kolkata',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(new Date());
+  const todayInKolkata = getTodayInKolkata();
 
-  const targetDateStr = `2026-10-${day < 10 ? '0' + day : day}`;
+  const targetDateStr = getJourneyDateString(day);
   const isUnlocked = todayInKolkata >= targetDateStr;
 
   return res.json({

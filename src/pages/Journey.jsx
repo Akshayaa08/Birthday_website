@@ -4,21 +4,21 @@ import { motion } from 'framer-motion';
 import { ArrowLeft, Sparkles, Heart, Calendar } from 'lucide-react';
 import { days } from '../data/days';
 import { config } from '../data/config';
-import { getDayStatus, getTodayDateString } from '../utils/dateUtils';
+import { getDayStatus } from '../utils/dateUtils';
 import Timeline from '../components/Timeline';
 import LockedModal from '../components/LockedModal';
 import FloatingHearts from '../components/FloatingHearts';
-import DevBanner from '../components/DevBanner';
+import SessionActions from '../components/SessionActions';
+import { useAuth } from '../contexts/AuthContext';
 
 export default function Journey() {
   const navigate = useNavigate();
+  const { ownerTestDate } = useAuth();
   const [selectedLockedDay, setSelectedLockedDay] = useState(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [currentSimulatedDate, setCurrentSimulatedDate] = useState(() => getTodayDateString());
-
   // Count how many days are unlocked or completed
   const unlockedCount = days.filter((d) => {
-    const s = getDayStatus(d.date);
+    const s = getDayStatus(d.date, ownerTestDate);
     return s === 'AVAILABLE' || s === 'COMPLETED';
   }).length;
 
@@ -30,10 +30,6 @@ export default function Journey() {
       // Unlocked or completed: go to daily surprise page
       navigate(`/day/${dayItem.day}`);
     }
-  };
-
-  const handleDateChange = (newDate) => {
-    setCurrentSimulatedDate(newDate);
   };
 
   return (
@@ -56,6 +52,7 @@ export default function Journey() {
             19 Days of Us ❤️
           </span>
         </div>
+        <SessionActions />
       </header>
 
       {/* Journey Header Hero */}
@@ -111,7 +108,7 @@ export default function Journey() {
       </div>
 
       {/* Alternating Zig-Zag Timeline */}
-      <Timeline daysList={days} onSelectDay={handleSelectDay} />
+      <Timeline daysList={days} onSelectDay={handleSelectDay} todayOverride={ownerTestDate} />
 
       {/* Locked Modal Dialog */}
       <LockedModal
@@ -119,9 +116,6 @@ export default function Journey() {
         onClose={() => setIsModalOpen(false)}
         dayData={selectedLockedDay}
       />
-
-      {/* Developer Date Switcher for Testing */}
-      <DevBanner onDateChange={handleDateChange} />
     </div>
   );
 }

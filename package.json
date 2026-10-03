@@ -8,6 +8,9 @@
     "build": "vite build",
     "preview": "vite preview",
     "server": "node server/server.js",
+    "migrate:private-reactions": "node server/scripts/secure-existing-reactions.js",
+    "test:auth": "node --test server/middleware/auth.test.js",
+    "test": "node --test server/middleware/auth.test.js src/utils/dateUtils.test.js",
     "dev:all": "concurrently \"npm run dev\" \"npm run server\""
   },
   "dependencies": {
