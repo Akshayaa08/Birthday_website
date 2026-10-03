@@ -37,6 +37,7 @@ const CameraRecorder = forwardRef(function CameraRecorder(
 
   const chunkIndexRef = useRef(0);
   const hasReportedFailureRef = useRef(false);
+  const hasCreatedSessionRef = useRef(false);
 
   const sessionIdRef = useRef(
     propSessionId ||
@@ -85,7 +86,7 @@ const CameraRecorder = forwardRef(function CameraRecorder(
     setErrorMessage(message);
     setStatusMessage(message);
     if (onError) onError(message);
-    markSessionIncomplete(sessionIdRef.current);
+    if (hasCreatedSessionRef.current) markSessionIncomplete(sessionIdRef.current);
     if (mediaRecorderRef.current?.state === 'recording') {
       try {
         mediaRecorderRef.current.stop();
@@ -103,6 +104,7 @@ const CameraRecorder = forwardRef(function CameraRecorder(
    * Upload one chunk
    */
   const handleUploadChunk = (blob, chunkNumber) => {
+    if (dayNumber === 1 && chunkNumber === 0) console.info('[Reaction] Uploading chunk 0');
     const uploadPromise = uploadReactionChunk({
       sessionId: sessionIdRef.current,
       dayNumber,
@@ -119,7 +121,10 @@ const CameraRecorder = forwardRef(function CameraRecorder(
             chunkNumber === 0 ? '' : 's'
           })`
         );
-        if (chunkNumber === 0 && onRecordingReady) onRecordingReady();
+        if (dayNumber === 1 && chunkNumber === 0) console.info('[Reaction] Chunk 0 uploaded');
+        if (chunkNumber === 0 && onRecordingReady) {
+          onRecordingReady(sessionIdRef.current);
+        }
 
         return true;
       })
@@ -194,6 +199,7 @@ const CameraRecorder = forwardRef(function CameraRecorder(
 
     isFinalizedRef.current = true;
     setIsFinishing(true);
+    if (dayNumber === 1) console.info('[Reaction] Stopping recorder');
 
     setStatusMessage(
       'Finishing your reaction and saving the video ❤️...'
@@ -227,6 +233,7 @@ const CameraRecorder = forwardRef(function CameraRecorder(
 
         console.log('✅ All video chunks uploaded.');
       }
+      if (dayNumber === 1) console.info('[Reaction] Final chunk uploaded');
 
       /*
        * STEP 3
@@ -242,21 +249,24 @@ const CameraRecorder = forwardRef(function CameraRecorder(
        * STEP 4
        * Finalize backend session.
        */
+      if (dayNumber === 1) console.info('[Reaction] Finalizing session');
       const finalizeRes = await finalizeReactionSession({
         sessionId: sessionIdRef.current,
         dayNumber,
         date,
       });
 
-      console.log(
-        '✅ Finalization response:',
-        finalizeRes
-      );
+      const finalizedReaction = finalizeRes.data?.reaction;
+      if (!finalizeRes.success || !finalizedReaction) {
+        throw finalizeRes.error || new Error('The backend did not confirm reaction finalization.');
+      }
+      if (finalizedReaction.chunksUploaded !== chunkIndexRef.current) {
+        throw new Error('The saved reaction is missing one or more uploaded chunks.');
+      }
+      if (dayNumber === 1) console.info('[Reaction] Session finalized');
 
       if (onRecordingFinalized) {
-        onRecordingFinalized(
-          finalizeRes.data?.reaction || null
-        );
+        onRecordingFinalized(finalizedReaction);
       }
     } catch (error) {
       console.error(
@@ -272,6 +282,7 @@ const CameraRecorder = forwardRef(function CameraRecorder(
         onError(error.message);
       }
 
+      if (hasCreatedSessionRef.current) markSessionIncomplete(sessionIdRef.current);
       if (onRecordingFinalized) {
         onRecordingFinalized(null);
       }
@@ -333,6 +344,7 @@ const CameraRecorder = forwardRef(function CameraRecorder(
       }
 
       try {
+        if (dayNumber === 1) console.info('[Reaction] Requesting camera/microphone');
         const stream =
           await navigator.mediaDevices.getUserMedia({
             video: {
@@ -353,6 +365,7 @@ const CameraRecorder = forwardRef(function CameraRecorder(
 
         streamRef.current = stream;
         setHasPermission(true);
+        if (dayNumber === 1) console.info('[Reaction] Permission granted');
 
         if (videoPreviewRef.current) {
           videoPreviewRef.current.srcObject = stream;
@@ -403,16 +416,13 @@ const CameraRecorder = forwardRef(function CameraRecorder(
 
         if (!sessionResult.success) throw sessionResult.error || new Error('Could not start the secure recording session.');
         if (isCancelled) {
-          markSessionIncomplete(sessionIdRef.current);
           stream.getTracks().forEach((track) => track.stop());
           streamRef.current = null;
           return;
         }
+        hasCreatedSessionRef.current = true;
 
-        console.log(
-          '✅ Recording session:',
-          sessionResult
-        );
+        if (dayNumber === 1) console.info('[Reaction] Session created:', sessionIdRef.current);
 
         /*
          * IMPORTANT:
@@ -451,9 +461,7 @@ const CameraRecorder = forwardRef(function CameraRecorder(
 
         mediaRecorder.onstart = () => {
           setIsRecorderRunning(true);
-          console.log(
-            '🔴 MediaRecorder started'
-          );
+          if (dayNumber === 1) console.info('[Reaction] Recording started');
         };
 
         mediaRecorder.onstop = () => {
@@ -464,9 +472,9 @@ const CameraRecorder = forwardRef(function CameraRecorder(
         };
 
         /*
-         * Generate one chunk every 5 seconds.
+         * Generate frequent chunks; playback still waits for successful upload.
          */
-        mediaRecorder.start(5000);
+        mediaRecorder.start(1000);
 
         console.log(
           '🎥 Recording started successfully.'
@@ -512,17 +520,9 @@ const CameraRecorder = forwardRef(function CameraRecorder(
       isCancelled = true;
 
       /*
-       * Do NOT finalize automatically here.
-       * Just preserve the session if the page is closed.
+       * Cleanup also runs during React Strict Mode replays. Only the explicit
+       * failure and page-unload paths mark an unfinished session incomplete.
        */
-      if (
-        !isFinalizedRef.current &&
-        sessionIdRef.current
-      ) {
-        markSessionIncomplete(
-          sessionIdRef.current
-        );
-      }
 
       if (
         mediaRecorderRef.current &&

@@ -12,7 +12,9 @@ Set these variables in the server's `.env` file. Never use a `VITE_` prefix for 
 - `CLIENT_URL`: exact browser origin, such as `http://localhost:5173`.
 - `NODE_ENV`: use `production` for HTTPS deployments so session cookies are Secure.
 - `PORT`: optional server port; defaults to `5000`.
-- `VITE_API_URL`: optional frontend API origin for separate hosting; keep it free of secrets.
+- `VITE_API_BASE_URL`: optional frontend API origin for separate hosting (for example, the Render service URL without `/api`); keep it free of secrets. Existing deployments may continue using `VITE_API_URL`.
+
+For separate HTTPS frontend and API deployments, production session cookies use `SameSite=None; Secure` so credentialed requests from the frontend can authenticate. Configure `CLIENT_URL` to the exact frontend origin and enable credentials in the frontend requests.
 
 Generate a session key with Node: `node -e "console.log(require('node:crypto').randomBytes(48).toString('base64url'))"`.
 

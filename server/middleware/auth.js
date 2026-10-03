@@ -97,10 +97,11 @@ export function verifyRequestOrigin(req, res, next) {
 }
 
 export function sessionCookieOptions() {
+  const isProduction = process.env.NODE_ENV === 'production';
   return {
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'strict',
+    secure: isProduction,
+    sameSite: isProduction ? 'none' : 'strict',
     path: '/',
     maxAge: SESSION_DURATION_SECONDS * 1000,
   };

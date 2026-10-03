@@ -16,7 +16,7 @@ export function AuthProvider({ children }) {
 
   useEffect(() => {
     let active = true;
-    apiFetch('/auth/me')
+    apiFetch('/api/auth/me')
       .then(({ user: currentUser }) => {
         if (active) setUser(currentUser);
       })
@@ -31,7 +31,7 @@ export function AuthProvider({ children }) {
   }, []);
 
   const login = async (username, password) => {
-    const { user: authenticatedUser } = await apiFetch('/auth/login', {
+    const { user: authenticatedUser } = await apiFetch('/api/auth/login', {
       method: 'POST',
       body: JSON.stringify({ username, password }),
     });
@@ -41,7 +41,7 @@ export function AuthProvider({ children }) {
   };
 
   const logout = async () => {
-    await apiFetch('/auth/logout', { method: 'POST' });
+    await apiFetch('/api/auth/logout', { method: 'POST' });
     setUser(null);
     setOwnerTestDate('');
   };

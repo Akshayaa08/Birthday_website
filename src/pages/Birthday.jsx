@@ -243,6 +243,7 @@ export default function Birthday() {
             ) : (
               <VideoPlayer
                 videoSrc={`${API_BASE}${birthdayVideo.videoUrl}`}
+                dayNumber={19}
                 title="Happy Birthday My Love ❤️"
                 onEnded={() => triggerConfetti()}
               />

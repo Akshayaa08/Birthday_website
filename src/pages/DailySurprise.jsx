@@ -37,7 +37,7 @@ export default function DailySurprise() {
   const [recordReaction, setRecordReaction] = useState(false);
   const [isFinalizing, setIsFinalizing] = useState(false);
   const [uploadMessage, setUploadMessage] = useState('');
-  const [isRecordingReady, setIsRecordingReady] = useState(false);
+  const [recordingSessionId, setRecordingSessionId] = useState(null);
   const [recordingError, setRecordingError] = useState('');
   const [activityError, setActivityError] = useState('');
   const [videoAvailability, setVideoAvailability] = useState({
@@ -59,6 +59,10 @@ export default function DailySurprise() {
   const hasReportedVideoStartRef = useRef(false);
   const activityStartPromiseRef = useRef(Promise.resolve());
   const activityStartFailedRef = useRef(false);
+
+  useEffect(() => {
+    if (dayNum === 1) console.info('[Birthday] Day opened', { dayNumber: dayNum });
+  }, [dayNum]);
 
   useEffect(() => {
     let active = true;
@@ -109,6 +113,16 @@ export default function DailySurprise() {
     };
   }, [recordReaction, phase, isFinalizing]);
 
+  useEffect(() => {
+    if (dayNum !== 1 || phase !== 'watching' || !videoAvailability.available) return;
+    if (!isOwner && !recordingSessionId) return;
+
+    const videoSrc = isOwner
+      ? `${API_BASE}${videoAvailability.videoUrl}`
+      : `${API_BASE}/api/videos/1/stream?sessionId=${encodeURIComponent(recordingSessionId)}`;
+    console.info('[Video] Video URL:', videoSrc);
+  }, [dayNum, isOwner, phase, recordingSessionId, videoAvailability.available, videoAvailability.videoUrl]);
+
   // If invalid day
   if (!dayData) {
     return (
@@ -131,6 +145,13 @@ export default function DailySurprise() {
   }
 
   const status = getDayStatus(dayData.date, ownerTestDate);
+  const videoSrc = videoAvailability.videoUrl
+    ? isOwner
+      ? `${API_BASE}${videoAvailability.videoUrl}`
+      : recordingSessionId
+        ? `${API_BASE}/api/videos/${dayData.day}/stream?sessionId=${encodeURIComponent(recordingSessionId)}`
+        : null
+    : null;
 
   // Enforce security / date locking: if today < surprise date, refuse access
   if (status === 'LOCKED') {
@@ -177,7 +198,7 @@ export default function DailySurprise() {
     sessionIdRef.current = typeof crypto !== 'undefined' && crypto.randomUUID
       ? crypto.randomUUID()
       : `sess_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
-    setIsRecordingReady(isOwner);
+    setRecordingSessionId(null);
     setRecordReaction(!isOwner);
     setPhase('watching');
   };
@@ -196,6 +217,7 @@ export default function DailySurprise() {
 
   // Triggered when daily video ends
   const handleVideoEnded = async () => {
+    if (videoEndedRef.current) return;
     videoEndedRef.current = true;
     if (!isOwner) {
       try {
@@ -227,7 +249,7 @@ export default function DailySurprise() {
     } else {
       setRecordingError('The reaction could not be saved. Please record again to continue.');
       setRecordReaction(false);
-      setIsRecordingReady(false);
+      setRecordingSessionId(null);
       setPhase('consent');
     }
   };
@@ -358,9 +380,10 @@ export default function DailySurprise() {
               </div>
 
               {/* Independent Daily Video Player */}
-              {(isOwner || isRecordingReady) && videoAvailability.available && videoAvailability.videoUrl ? (
+              {(isOwner || recordingSessionId) && videoAvailability.available && videoSrc ? (
                 <VideoPlayer
-                  videoSrc={`${API_BASE}${videoAvailability.videoUrl}${isOwner ? '' : `?sessionId=${encodeURIComponent(sessionIdRef.current)}`}`}
+                  videoSrc={videoSrc}
+                  dayNumber={dayData.day}
                   onPlaybackStarted={handleVideoStarted}
                   onEnded={handleVideoEnded}
                   allowSimulation={false}
@@ -381,11 +404,11 @@ export default function DailySurprise() {
                   dayNumber={dayData.day}
                   date={dayData.date}
                   sessionId={sessionIdRef.current}
-                  onRecordingReady={() => setIsRecordingReady(true)}
+                  onRecordingReady={setRecordingSessionId}
                   onRecordingFinalized={handleRecordingFinalized}
                   onError={(msg) => {
                     setRecordingError(msg);
-                    setIsRecordingReady(false);
+                    setRecordingSessionId(null);
                     setRecordReaction(false);
                     setPhase('consent');
                   }}

@@ -1,4 +1,11 @@
-export const API_BASE = (import.meta.env.VITE_API_URL || '').replace(/\/+$/, '');
+const configuredApiBase = (
+  import.meta.env.VITE_API_BASE_URL ||
+  import.meta.env.VITE_API_URL ||
+  ''
+).replace(/\/+$/, '');
+
+// API_BASE is the API origin only; API paths in this project include /api.
+export const API_BASE = configuredApiBase.replace(/\/api$/i, '');
 
 export async function apiFetch(path, options = {}) {
   const headers = new Headers(options.headers || {});

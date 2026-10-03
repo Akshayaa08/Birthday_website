@@ -363,11 +363,9 @@ export async function uploadReactionChunk(req, res) {
       const updatedDoc =
         await Reaction.findOneAndUpdate(
           { sessionId, userId: req.user.userId },
-
           {
-            $set: {
-              chunksUploaded:
-                actualChunkCount,
+            $max: {
+              chunksUploaded: actualChunkCount,
             },
 
           },
@@ -457,6 +455,14 @@ export async function finalizeReactionSession(req, res) {
         error: 'No video chunks were uploaded. The recording could not be finalized.',
         sessionId,
         chunksFound: 0,
+      });
+    }
+    if (chunkFiles.length !== session.chunksUploaded) {
+      return res.status(409).json({
+        success: false,
+        error: 'Uploaded reaction chunks are not yet consistent. Please retry finalization.',
+        expectedChunks: session.chunksUploaded,
+        chunksFound: chunkFiles.length,
       });
     }
 

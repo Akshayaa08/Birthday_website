@@ -2,7 +2,7 @@ import React, { useRef, useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { Play, Pause, Volume2, VolumeX, Maximize, AlertCircle, Heart, Sparkles, CheckCircle } from 'lucide-react';
 
-export default function VideoPlayer({ videoSrc, onEnded, onPlaybackStarted, allowSimulation = true, allowSeeking = true, title = "Today's Surprise" }) {
+export default function VideoPlayer({ videoSrc, dayNumber, onEnded, onPlaybackStarted, allowSimulation = true, allowSeeking = true, title = "Today's Surprise" }) {
   const videoRef = useRef(null);
   const containerRef = useRef(null);
 
@@ -18,44 +18,70 @@ export default function VideoPlayer({ videoSrc, onEnded, onPlaybackStarted, allo
     const video = videoRef.current;
     if (!video) return;
 
+    const logVideoState = (eventName) => {
+      console.info(`[Video] ${eventName}`, {
+        videoSrc,
+        errorCode: video.error?.code ?? null,
+        errorMessage: video.error?.message ?? null,
+        networkState: video.networkState,
+        readyState: video.readyState,
+      });
+    };
     const handleTimeUpdate = () => setCurrentTime(video.currentTime);
     const handleLoadedMetadata = () => {
+      logVideoState('Metadata loaded');
       setDuration(video.duration);
       setHasVideoError(false);
     };
+    const handleCanPlay = () => logVideoState('Can play');
     const handlePlay = () => {
       setIsPlaying(true);
     };
     const handlePlaying = () => {
+      logVideoState('Playing');
       if (onPlaybackStarted) onPlaybackStarted();
     };
     const handlePause = () => setIsPlaying(false);
     const handleEnded = () => {
+      logVideoState('Ended');
       setIsPlaying(false);
       if (onEnded) onEnded();
     };
     const handleError = () => {
+      logVideoState('Playback error');
       setHasVideoError(true);
     };
+    const handleStalled = () => logVideoState('Stalled');
+    const handleAbort = () => logVideoState('Aborted');
 
+    if (video.dataset.loggedSource !== videoSrc) {
+      console.info(`[Video] Loading Day ${dayNumber || ''} video`, { videoSrc });
+      video.dataset.loggedSource = videoSrc;
+    }
     video.addEventListener('timeupdate', handleTimeUpdate);
     video.addEventListener('loadedmetadata', handleLoadedMetadata);
+    video.addEventListener('canplay', handleCanPlay);
     video.addEventListener('play', handlePlay);
     video.addEventListener('playing', handlePlaying);
     video.addEventListener('pause', handlePause);
     video.addEventListener('ended', handleEnded);
     video.addEventListener('error', handleError);
+    video.addEventListener('stalled', handleStalled);
+    video.addEventListener('abort', handleAbort);
 
     return () => {
       video.removeEventListener('timeupdate', handleTimeUpdate);
       video.removeEventListener('loadedmetadata', handleLoadedMetadata);
+      video.removeEventListener('canplay', handleCanPlay);
       video.removeEventListener('play', handlePlay);
       video.removeEventListener('playing', handlePlaying);
       video.removeEventListener('pause', handlePause);
       video.removeEventListener('ended', handleEnded);
       video.removeEventListener('error', handleError);
+      video.removeEventListener('stalled', handleStalled);
+      video.removeEventListener('abort', handleAbort);
     };
-  }, [onEnded, onPlaybackStarted]);
+  }, [dayNumber, onEnded, onPlaybackStarted, videoSrc]);
 
   const togglePlay = () => {
     const video = videoRef.current;

@@ -12,6 +12,18 @@ dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+const configuredClientUrl = process.env.CLIENT_URL;
+if (process.env.NODE_ENV === 'production' && !configuredClientUrl) {
+  throw new Error('CLIENT_URL must be set to the deployed frontend origin in production.');
+}
+const clientOriginUrl = new URL(configuredClientUrl || 'http://localhost:5173');
+if (
+  process.env.NODE_ENV === 'production' &&
+  ['localhost', '127.0.0.1', '::1'].includes(clientOriginUrl.hostname)
+) {
+  throw new Error('CLIENT_URL must not point to localhost in production.');
+}
+const clientOrigin = clientOriginUrl.origin;
 
 assertAuthConfiguration();
 
@@ -21,7 +33,7 @@ connectDB();
 // Middleware
 app.use(
   cors({
-    origin: process.env.CLIENT_URL || 'http://localhost:5173',
+    origin: clientOrigin,
     credentials: true,
   })
 );
